@@ -55,3 +55,51 @@ jobs:
         with:
           name: recon3d-dist
           path: dist/*
+
+  # Runs the accuracy gate on the tagged source and attaches the *measured*
+  # report to the release, so a released version ships machine-checkable
+  # accuracy evidence instead of a claim. The report is produced by
+  # scripts/e2e_check.py from a freshly generated reference set - the same
+  # fixture that developers run locally.
+  e2e-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the engine
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e ".[all]"
+
+      - name: Generate the reference set
+        run: python scripts/make_demo_dataset.py --out ./refs --views 9 --masks
+
+      - name: Run the end-to-end accuracy gate
+        id: gate
+        continue-on-error: true
+        run: |
+          python scripts/e2e_check.py --preset standard --views 9             --resolution 384 --texture-resolution 1024 --min-iou 0.55             | tee gate.log
+
+      - name: Attach the measured report to the release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}"
+          if [ -f .e2e/e2e-standard.json ]; then
+            cp .e2e/e2e-standard.json recon3d-e2e-report-${TAG}.json
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" recon3d-e2e-report-${TAG}.json --clobber
+            fi
+          else
+            echo "gate produced no report"; tail -40 gate.log || true
+          fi
+
+      - name: Fail the job when the gate failed
+        if: steps.gate.outcome == 'failure'
+        run: exit 1
