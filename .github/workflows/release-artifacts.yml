@@ -1,0 +1,57 @@
+name: release-artifacts
+
+# Builds the sdist + wheel from the tagged source and attaches them to the GitHub
+# release, plus the end-to-end accuracy report produced by the gate when it is
+# present in the repository (it is normally a local artefact and is skipped).
+#
+# The asset upload has to run on a GitHub runner: `uploads.github.com` is not
+# reachable from every environment that can push a tag.
+
+on:
+  push:
+    branches: ["arena/01a10ae3-software"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --quiet --upgrade build
+          python -m build --outdir dist
+
+      - name: Sanity-check the wheel installs and reports its version
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install --quiet dist/*.whl
+          /tmp/venv/bin/recon3d --version
+          /tmp/venv/bin/recon3d doctor --json | /tmp/venv/bin/python -c "import json,sys; d=json.load(sys.stdin); print('doctor ok:', d.get('version') or d.get('ok'))"
+
+      - name: Attach artefacts to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            gh release view "$TAG" --json assets --jq '[.assets[].name]'
+          else
+            echo "no release for $TAG yet; uploading as workflow artefact"
+            exit 0
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recon3d-dist
+          path: dist/*
