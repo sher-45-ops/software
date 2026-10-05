@@ -82,23 +82,33 @@ jobs:
       - name: Run the end-to-end accuracy gate
         id: gate
         continue-on-error: true
-        run: |
-          python scripts/e2e_check.py --preset standard --views 9             --resolution 384 --texture-resolution 1024 --min-iou 0.55             | tee gate.log
+        run: >-
+          python scripts/e2e_check.py --preset standard --views 9
+          --resolution 384 --texture-resolution 1024 --min-iou 0.55 --keep
+          | tee gate.log
+        # --keep is required: without it the gate deletes its work directory on
+        # success, which is exactly where the report this job attaches lives.
 
-      - name: Attach the measured report to the release
-        if: always()
+      - name: Publish the measured report
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}"
-          if [ -f .e2e/e2e-standard.json ]; then
-            cp .e2e/e2e-standard.json recon3d-e2e-report-${TAG}.json
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" recon3d-e2e-report-${TAG}.json --clobber
-            fi
-          else
-            echo "gate produced no report"; tail -40 gate.log || true
+          test -f .e2e/e2e-standard.json || {
+            echo "::error::the gate produced no report"; tail -40 gate.log || true; exit 1; }
+          python -c "import json;d=json.load(open('.e2e/e2e-standard.json'));print('gate report:', json.dumps({k:d.get(k) for k in ('preset','duration_s','quality','metrics','ok','result')})[:2000])"
+          cp .e2e/e2e-standard.json "recon3d-e2e-report-${TAG}.json"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "recon3d-e2e-report-${TAG}.json" --clobber
+            gh release view "$TAG" --json assets --jq '[.assets[].name]'
           fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recon3d-e2e-report
+          path: .e2e/e2e-standard.json
+          if-no-files-found: warn
 
       - name: Fail the job when the gate failed
         if: steps.gate.outcome == 'failure'
