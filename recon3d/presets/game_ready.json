@@ -1,0 +1,23 @@
+{
+  "name": "game_ready",
+  "description": "Optimised for real-time engines: strict polycount, LOD chain, no heavy refinement.",
+  "performance_mode": "balanced",
+  "params": {
+    "geometry": "medium",
+    "texture_resolution": 2048,
+    "target_polycount": 40000,
+    "generate_lods": true,
+    "lod_levels": 4,
+    "generate_pbr": true,
+    "photo_consistency": true,
+    "refine_passes": 1,
+    "export_formats": [
+      "glb",
+      "fbx",
+      "obj"
+    ]
+  },
+  "policy": {
+    "target_polycount": "force"
+  }
+}

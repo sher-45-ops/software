@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "recon3d": {
+      "command": "python",
+      "args": ["-m", "recon3d.mcpserver"],
+      "env": { "RECON3D_HOME": "/absolute/path/to/recon3d-data" }
+    }
+  }
+}

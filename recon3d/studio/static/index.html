@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Recon3D Studio</title>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #141821; --panel-2: #1b2130; --line: #262d3d;
+    --text: #e8ecf4; --muted: #93a0b8; --accent: #5b8cff; --accent-2: #38d39f;
+    --warn: #f0b429; --err: #ff6b6b; --ok: #38d39f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 14px 20px;
+           border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .3px; }
+  header .badge { font-size: 11px; color: var(--muted); border: 1px solid var(--line);
+                  padding: 2px 8px; border-radius: 999px; }
+  header .spacer { flex: 1; }
+  main { display: grid; grid-template-columns: 320px 1fr 380px; gap: 16px; padding: 16px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+              margin: 0 0 10px; }
+  button { background: var(--accent); color: white; border: 0; border-radius: 8px; padding: 8px 12px;
+           font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input, select { width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+                  border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
+  .list li { padding: 8px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+  .list li:hover { background: var(--panel-2); }
+  .list li.active { border-color: var(--accent); background: #16203a; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .bar { height: 10px; background: var(--panel-2); border-radius: 999px; overflow: hidden; margin: 8px 0; }
+  .bar > div { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+               transition: width .25s ease; }
+  .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+         background: #0a0c11; border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+         height: 220px; overflow: auto; white-space: pre-wrap; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+  .grid img { width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #fff; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+          border: 1px solid var(--line); margin: 0 4px 4px 0; }
+  .pill.ok { color: var(--ok); border-color: #1d4d3c; }
+  .pill.warn { color: var(--warn); border-color: #4d3f1d; }
+  .pill.err { color: var(--err); border-color: #4d1d1d; }
+  a { color: var(--accent); }
+  .score { font-size: 34px; font-weight: 700; }
+  .kv { display: grid; grid-template-columns: 120px 1fr; gap: 4px 10px; font-size: 12.5px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  footer { padding: 16px 20px 32px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Recon3D Studio</h1>
+  <span class="badge" id="version">…</span>
+  <span class="badge" id="offline">…</span>
+  <span class="spacer"></span>
+  <span class="muted" id="status-line">idle</span>
+</header>
+
+<main>
+  <!-- projects -->
+  <section class="panel">
+    <h2>Projects</h2>
+    <input id="project-name" placeholder="new project name" />
+    <div class="row">
+      <select id="subject-type">
+        <option>auto</option><option>character</option><option>creature</option>
+        <option>vehicle</option><option>prop</option><option>object</option><option>robot</option>
+      </select>
+      <button id="create-project">Create</button>
+    </div>
+    <ul class="list" id="projects"></ul>
+    <h2 style="margin-top:14px">Reference images</h2>
+    <input type="file" id="image-input" multiple accept="image/*" />
+    <button class="secondary" id="upload" disabled>Upload to selected project</button>
+    <p class="muted" id="image-count">no project selected</p>
+  </section>
+
+  <!-- run + viewer -->
+  <section class="panel">
+    <h2>Reconstruct</h2>
+    <div class="row">
+      <div><label>preset</label>
+        <select id="preset">
+          <option>draft</option><option selected>standard</option><option>high</option>
+          <option>ultra</option><option>game_ready</option><option>cinematic</option>
+        </select>
+      </div>
+      <div><label>target polycount</label><input id="polycount" placeholder="auto" /></div>
+    </div>
+    <div class="row">
+      <div><label>texture resolution</label>
+        <select id="texture-res"><option>1024</option><option selected>2048</option>
+          <option>4096</option><option>8192</option></select>
+      </div>
+      <div><label>units</label>
+        <select id="units"><option>normalized</option><option>meters</option>
+          <option>centimeters</option></select>
+      </div>
+    </div>
+    <div class="row" style="align-items:center; margin-bottom:8px">
+      <label style="margin:0"><input type="checkbox" id="rig" style="width:auto"> rig</label>
+      <label style="margin:0"><input type="checkbox" id="lods" checked style="width:auto"> LODs</label>
+      <label style="margin:0"><input type="checkbox" id="previews" checked style="width:auto"> previews</label>
+    </div>
+    <button id="run" disabled>Start reconstruction</button>
+    <button class="secondary" id="cancel" disabled>Cancel</button>
+    <div class="bar"><div id="progress-bar"></div></div>
+    <div class="log" id="log">Ready.</div>
+    <h2 style="margin-top:14px">Previews</h2>
+    <div class="grid" id="previews"></div>
+    <h2 style="margin-top:14px">Downloads</h2>
+    <div id="downloads" class="muted">A finished run lists its artefacts here.</div>
+  </section>
+
+  <!-- report -->
+  <section class="panel">
+    <h2>Quality report</h2>
+    <div id="quality" class="muted">Run a reconstruction to see measured quality.</div>
+    <h2 style="margin-top:14px">Machine-readable</h2>
+    <div id="report-links" class="muted">—</div>
+  </section>
+</main>
+
+<footer>
+  Recon3D runs locally on your CPU. No images, prompts or models leave this machine
+  unless you explicitly download an optional model with <code>recon3d models download</code>.
+</footer>
+
+<script>
+const api = (path, options) => fetch(path, options).then(async (r) => {
+  const text = await r.text();
+  try { return JSON.parse(text); } catch (e) { return { ok: r.ok, text }; }
+});
+let state = { project: null, job: null, socket: null, versionDir: null };
+
+function log(line) {
+  const el = document.getElementById('log');
+  el.textContent += (el.textContent ? '\n' : '') + line;
+  el.scrollTop = el.scrollHeight;
+}
+function setStatus(text) { document.getElementById('status-line').textContent = text; }
+
+async function boot() {
+  const health = await api('/health');
+  document.getElementById('version').textContent = 'v' + (health.version || '?');
+  document.getElementById('offline').textContent = health.offline ? 'offline mode' : 'network allowed (models only)';
+  refreshProjects();
+  setInterval(() => { if (state.job) pollJob(); }, 1500);
+}
+
+async function refreshProjects() {
+  const data = await api('/v1/projects');
+  const list = document.getElementById('projects');
+  list.innerHTML = '';
+  (data.projects || []).forEach((p) => {
+    const li = document.createElement('li');
+    li.innerHTML = `<strong>${p.id}</strong> <span class="muted">· ${p.images || 0} images · ${p.subject_type || ''}</span>`;
+    li.onclick = () => selectProject(p.id, li);
+    if (state.project === p.id) li.classList.add('active');
+    list.appendChild(li);
+  });
+}
+
+async function selectProject(id, li) {
+  state.project = id;
+  document.querySelectorAll('#projects li').forEach((el) => el.classList.remove('active'));
+  if (li) li.classList.add('active');
+  const data = await api('/v1/projects/' + id);
+  document.getElementById('image-count').textContent =
+    `${(data.images || []).length} reference image(s)`;
+  document.getElementById('run').disabled = !(data.images || []).length;
+  document.getElementById('upload').disabled = false;
+  setStatus('project ' + id);
+}
+
+async function createProject() {
+  const name = document.getElementById('project-name').value.trim() || 'untitled';
+  const data = await api('/v1/projects', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, subject_type: document.getElementById('subject-type').value }),
+  });
+  log('created project ' + data.id);
+  await refreshProjects();
+  selectProject(data.id);
+}
+
+async function uploadImages() {
+  if (!state.project) return;
+  const input = document.getElementById('image-input');
+  if (!input.files.length) { log('pick images first'); return; }
+  const form = new FormData();
+  for (const file of input.files) form.append('files', file);
+  const data = await api(`/v1/projects/${state.project}/images`, { method: 'POST', body: form });
+  log(`uploaded ${data.added ? data.added.length : 0} image(s)`);
+  selectProject(state.project);
+}
+
+async function startRun() {
+  if (!state.project) return;
+  const params = {
+    preset: document.getElementById('preset').value,
+    texture_resolution: parseInt(document.getElementById('texture-res').value, 10),
+    units: document.getElementById('units').value,
+    generate_rig: document.getElementById('rig').checked,
+    generate_lods: document.getElementById('lods').checked,
+    generate_previews: document.getElementById('previews').checked,
+  };
+  const poly = document.getElementById('polycount').value.trim();
+  if (poly) params.target_polycount = parseInt(poly, 10);
+  const data = await api(`/v1/projects/${state.project}/reconstruct`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(params),
+  });
+  if (!data.job) { log('could not start: ' + JSON.stringify(data)); return; }
+  state.job = data.job.id;
+  document.getElementById('cancel').disabled = false;
+  document.getElementById('downloads').innerHTML = '';
+  document.getElementById('log').textContent = '';
+  log('job ' + state.job + ' started (' + params.preset + ')');
+  openSocket(state.job);
+}
+
+function openSocket(jobId) {
+  if (state.socket) { try { state.socket.close(); } catch (e) {} }
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const socket = new WebSocket(`${proto}://${location.host}/v1/ws/jobs/${jobId}`);
+  state.socket = socket;
+  socket.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.kind === 'done') {
+      log('job finished: ' + payload.state);
+      document.getElementById('cancel').disabled = true;
+      onFinished(payload.result);
+      return;
+    }
+    if (payload.kind === 'error') { log('error: ' + payload.message); return; }
+    const pct = payload.progress != null ? payload.progress : 0;
+    document.getElementById('progress-bar').style.width = pct + '%';
+    if (payload.message) log(`${pct.toFixed(0).padStart(3)}% [${payload.stage || '-'}] ${payload.message}`);
+  };
+  socket.onclose = () => { if (state.job) pollJob(); };
+}
+
+async function pollJob() {
+  if (!state.job) return;
+  const job = await api('/v1/jobs/' + state.job);
+  document.getElementById('progress-bar').style.width = (job.progress || 0) + '%';
+  if (job.state === 'completed' || job.state === 'failed' || job.state === 'cancelled') {
+    state.job = null;
+    document.getElementById('cancel').disabled = true;
+    onFinished(job.result);
+  }
+}
+
+function onFinished(result) {
+  if (!result) return;
+  const quality = result.quality || {};
+  const stats = result.statistics || {};
+  const metrics = quality.metrics || {};
+  document.getElementById('quality').innerHTML = `
+    <div class="score">${(quality.overall || 0).toFixed(1)}<span class="muted" style="font-size:14px">/100</span></div>
+    <div class="muted">grade: <strong>${quality.grade || '-'}</strong></div>
+    <div class="kv" style="margin-top:10px">
+      <div>geometry</div><div>${(quality.geometry_quality || 0).toFixed(1)}</div>
+      <div>reference fit</div><div>${(quality.reference_similarity || 0).toFixed(1)}</div>
+      <div>mesh health</div><div>${(quality.mesh_health || 0).toFixed(1)}</div>
+      <div>textures</div><div>${(quality.texture_quality || 0).toFixed(1)}</div>
+      <div>silhouette IoU</div><div>${(metrics.mean_silhouette_iou || 0).toFixed(3)}</div>
+      <div>triangles</div><div>${stats.triangles || 0}</div>
+      <div>LODs</div><div>${stats.lod_levels || 0}</div>
+      <div>texture</div><div>${stats.texture_resolution || 0}px</div>
+    </div>
+    <div style="margin-top:10px">${(quality.warnings || []).map((w) => `<span class="pill warn">${w}</span>`).join('')}</div>
+    <div>${(quality.missing_regions || []).slice(0, 6).map((w) => `<span class="pill err">${w}</span>`).join('')}</div>`;
+
+  const outputs = result.outputs || {};
+  state.versionDir = outputs.version_dir || null;
+  const previews = outputs.previews || [];
+  const grid = document.getElementById('previews');
+  grid.innerHTML = '';
+  previews.slice(0, 12).forEach((url) => {
+    const img = document.createElement('img');
+    img.src = url.startsWith('/') ? url : url;
+    img.loading = 'lazy';
+    grid.appendChild(img);
+  });
+  const links = [];
+  ['glb', 'obj', 'fbx', 'stl', 'ply', 'usdz'].forEach((fmt) => {
+    const url = (outputs.mesh || {})[fmt];
+    if (url) links.push(`<a href="${url}" download>${fmt}</a>`);
+  });
+  document.getElementById('downloads').innerHTML = links.join(' · ') || 'no mesh exports listed';
+  const reports = outputs.reports || {};
+  document.getElementById('report-links').innerHTML =
+    Object.entries(reports).map(([k, v]) => `<a href="${v}" download>${k}.json</a>`).join(' · ') || '—';
+}
+
+document.getElementById('create-project').onclick = createProject;
+document.getElementById('upload').onclick = uploadImages;
+document.getElementById('run').onclick = startRun;
+document.getElementById('cancel').onclick = async () => {
+  if (state.job) { await api(`/v1/jobs/${state.job}/cancel`, { method: 'POST' }); log('cancel requested'); }
+};
+boot();
+</script>
+</body>
+</html>

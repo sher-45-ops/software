@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Test / coverage artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+.e2e/
+demo/
+wheels/
+
+# Local data roots and outputs (never commit user assets)
+recon3d-data/
+*.recon3d/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recon3d"
+version = "1.0.0"
+description = "Local-first multi-view image-to-3D reconstruction engine with CLI, REST API and MCP interfaces"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Recon3D Engine Contributors" }]
+keywords = ["3d", "reconstruction", "photogrammetry", "multi-view", "sfm", "mcp", "agents", "glb"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+# Core runtime dependencies. All are permissively licensed, pip-installable and
+# run on CPU. See LICENSES.md for the full dependency/licence table.
+dependencies = [
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "opencv-python-headless>=4.8",
+  "Pillow>=10.0",
+  "scikit-image>=0.22",
+  "trimesh>=4.0",
+  "psutil>=5.9",
+  "PyYAML>=6.0",
+  "fast-simplification>=0.1.7",
+]
+
+[project.optional-dependencies]
+# Interfaces (CLI works without these; API/MCP server need them).
+api = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9"]
+mcp = ["mcp>=1.2"]
+# Quality boosters: used automatically when importable.
+quality = ["xatlas>=0.0.9", "pygltflib>=1.16"]
+# Local neural backends (optional, models downloaded by `recon3d models download`).
+neural = ["onnxruntime>=1.17"]
+# Desktop window for the studio UI (falls back to the browser).
+desktop = ["pywebview>=5.0"]
+dev = [
+  "pytest>=8.0",
+  "pytest-timeout>=2.3",
+  "httpx>=0.27",
+  "build>=1.2",
+  "mcp>=1.2",
+  "xatlas>=0.0.9",
+]
+# Everything a power user / CI agent needs.
+all = [
+  "fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9",
+  "mcp>=1.2", "xatlas>=0.0.9", "pygltflib>=1.16", "onnxruntime>=1.17",
+]
+
+[project.scripts]
+recon3d = "recon3d.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/sher-45-ops/software"
+Repository = "https://github.com/sher-45-ops/software"
+Documentation = "https://github.com/sher-45-ops/software/blob/arena/01a10ae3-software/README.md"
+Issues = "https://github.com/sher-45-ops/software/issues"
+
+[tool.setuptools]
+packages = [
+  "recon3d",
+  "recon3d.core",
+  "recon3d.engine",
+  "recon3d.engine.ingestion",
+  "recon3d.engine.validation",
+  "recon3d.engine.segmentation",
+  "recon3d.engine.cameras",
+  "recon3d.engine.reconstruction",
+  "recon3d.engine.geometry",
+  "recon3d.engine.textures",
+  "recon3d.engine.materials",
+  "recon3d.engine.rigging",
+  "recon3d.engine.optimization",
+  "recon3d.engine.export",
+  "recon3d.engine.analysis",
+  "recon3d.engine.compare",
+  "recon3d.engine.backends",
+  "recon3d.modelzoo",
+  "recon3d.api",
+  "recon3d.cli",
+  "recon3d.mcpserver",
+  "recon3d.studio",
+]
+include-package-data = true
+
+[tool.setuptools.package-data]
+recon3d = [
+  "presets/*.json",
+  "studio/static/*",
+  "studio/static/**/*",
+  "modelzoo/registry.json",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+  "slow: end-to-end reconstruction tests (minutes)",
+  "gpu: needs a CUDA GPU",
+  "network: needs network access",
+]

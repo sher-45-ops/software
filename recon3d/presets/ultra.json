@@ -1,0 +1,21 @@
+{
+  "name": "ultra",
+  "description": "Maximum reconstruction quality: every stage at full effort.",
+  "performance_mode": "maximum",
+  "params": {
+    "geometry": "high",
+    "texture_resolution": 8192,
+    "target_polycount": "auto",
+    "generate_lods": true,
+    "generate_pbr": true,
+    "photo_consistency": true,
+    "refine_passes": 3,
+    "lod_levels": 4,
+    "export_formats": [
+      "glb",
+      "obj",
+      "fbx"
+    ]
+  },
+  "policy": {}
+}

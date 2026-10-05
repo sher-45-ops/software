@@ -1,0 +1,24 @@
+{
+  "name": "cinematic",
+  "description": "Maximum detail for offline rendering: no polycount limit, full refinement.",
+  "performance_mode": "maximum",
+  "params": {
+    "geometry": "high",
+    "texture_resolution": 8192,
+    "target_polycount": 0,
+    "generate_lods": false,
+    "generate_pbr": true,
+    "photo_consistency": true,
+    "refine_passes": 4,
+    "lod_levels": 1,
+    "export_formats": [
+      "glb",
+      "obj",
+      "fbx",
+      "usda"
+    ]
+  },
+  "policy": {
+    "target_polycount": "force"
+  }
+}

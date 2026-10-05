@@ -1,0 +1,20 @@
+{
+  "name": "high",
+  "description": "High-quality asset: finer carving, larger textures, refinement.",
+  "performance_mode": "quality",
+  "params": {
+    "geometry": "high",
+    "texture_resolution": 4096,
+    "target_polycount": "auto",
+    "generate_lods": true,
+    "generate_pbr": true,
+    "photo_consistency": true,
+    "refine_passes": 2,
+    "lod_levels": 4,
+    "export_formats": [
+      "glb",
+      "obj"
+    ]
+  },
+  "policy": {}
+}

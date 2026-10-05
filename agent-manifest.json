@@ -1,0 +1,420 @@
+{
+  "schema": 1,
+  "name": "recon3d",
+  "display_name": "Recon3D Engine",
+  "version": "1.0.0",
+  "summary": "Local-first multi-view image to 3D reconstruction engine. Turns front/back/left/right/three-quarter/top reference images of a subject into a real textured mesh (with UVs, PBR maps, LODs and an optional rig). Runs entirely on the local CPU; no external generative AI service is used.",
+  "license": "Apache-2.0",
+  "repository": {
+    "url": "https://github.com/sher-45-ops/software",
+    "branch": "arena/01a10ae3-software",
+    "clone": "git clone -b arena/01a10ae3-software https://github.com/sher-45-ops/software.git recon3d-engine"
+  },
+  "install": {
+    "python": ">=3.9",
+    "commands": [
+      "python -m venv .venv",
+      ". .venv/bin/activate    # Windows: .venv\\Scripts\\activate",
+      "pip install -e \".[all]\"",
+      "recon3d doctor"
+    ],
+    "core_dependencies_installed_automatically": [
+      "numpy",
+      "scipy",
+      "opencv-python-headless",
+      "Pillow",
+      "scikit-image",
+      "trimesh",
+      "psutil",
+      "PyYAML",
+      "fast-simplification"
+    ],
+    "optional_extras": {
+      "api": [
+        "fastapi",
+        "uvicorn",
+        "python-multipart"
+      ],
+      "mcp": [
+        "mcp>=1.2"
+      ],
+      "quality": [
+        "xatlas",
+        "pygltflib"
+      ],
+      "neural": [
+        "onnxruntime"
+      ],
+      "desktop": [
+        "pywebview"
+      ]
+    }
+  },
+  "interfaces": {
+    "cli": {
+      "entry": "recon3d",
+      "commands": [
+        "doctor",
+        "setup",
+        "create",
+        "add-images",
+        "projects",
+        "project",
+        "reconstruct",
+        "status",
+        "versions",
+        "export",
+        "serve",
+        "studio",
+        "models",
+        "info"
+      ],
+      "machine_readable": "--json on every command"
+    },
+    "rest": {
+      "entry": "recon3d serve --port 8760",
+      "endpoints": [
+        "GET /health",
+        "GET /v1/capabilities",
+        "GET /v1/doctor",
+        "GET /v1/presets",
+        "POST /v1/projects",
+        "GET /v1/projects/{id}",
+        "POST /v1/projects/{id}/images",
+        "POST /v1/projects/{id}/reconstruct",
+        "GET /v1/jobs/{id}",
+        "POST /v1/jobs/{id}/cancel",
+        "GET /v1/jobs/{id}/artifacts",
+        "GET /v1/jobs/{id}/artifacts/{path}",
+        "POST /v1/export",
+        "GET /v1/models"
+      ],
+      "websocket": "WS /v1/ws/jobs/{id}"
+    },
+    "mcp": {
+      "entry": "python -m recon3d.mcpserver",
+      "transport": [
+        "stdio",
+        "sse",
+        "streamable-http"
+      ],
+      "tools": [
+        "recon3d_doctor",
+        "recon3d_create_project",
+        "recon3d_reconstruct",
+        "recon3d_job_status",
+        "recon3d_list_outputs"
+      ]
+    },
+    "python": {
+      "entry": "from recon3d.core.pipeline import run_pipeline"
+    }
+  },
+  "capabilities": {
+    "stages": [
+      {
+        "name": "ingestion",
+        "description": "load reference images, EXIF/orientation normalisation, hashing"
+      },
+      {
+        "name": "validation",
+        "description": "per-image quality checks (blur, exposure, duplicate, resolution)"
+      },
+      {
+        "name": "segmentation",
+        "description": "subject masks (colour/edge based, optional local salient model)"
+      },
+      {
+        "name": "analysis",
+        "description": "subject-type classification, symmetry detection, material hints"
+      },
+      {
+        "name": "features",
+        "description": "feature extraction + cross-view matching evidence"
+      },
+      {
+        "name": "camera_estimation",
+        "description": "ring/lens/scale solve for every reference image"
+      },
+      {
+        "name": "mesh_reconstruction",
+        "description": "visual hull carving, photometric shell carve, depth fusion"
+      },
+      {
+        "name": "silhouette_refine",
+        "description": "re-render vs references, adjust cameras if it objectively improves"
+      },
+      {
+        "name": "mesh_cleanup",
+        "description": "floaters, holes, non-manifold, normals, weld, degenerate faces"
+      },
+      {
+        "name": "optimization",
+        "description": "topology + polycount control (game-ready budgets)"
+      },
+      {
+        "name": "uv",
+        "description": "UV unwrap (xatlas, built-in fallback) + quality report"
+      },
+      {
+        "name": "texture",
+        "description": "multi-view texture projection, PBR map derivation, ORM packing"
+      },
+      {
+        "name": "materials",
+        "description": "evidence-based PBR material estimation + agent overrides"
+      },
+      {
+        "name": "rigging",
+        "description": "humanoid/creature skeleton + skin weights + deformation stress test"
+      },
+      {
+        "name": "lod",
+        "description": "LOD0-3 chain with error metrics"
+      },
+      {
+        "name": "preview",
+        "description": "stills, turntable GIF, comparison sheets, wireframe/normal/UV views"
+      },
+      {
+        "name": "comparison",
+        "description": "render vs reference comparison, quality score, similarity refinement"
+      },
+      {
+        "name": "export",
+        "description": "GLB/GLTF/OBJ/FBX/STL/PLY/USD(Z) writers + independent verification"
+      }
+    ],
+    "presets": {
+      "draft": "fastest, lowest detail (preview / iteration)",
+      "standard": "balanced default for everyday assets",
+      "high": "high quality, larger textures, camera refinement",
+      "ultra": "maximum quality, every stage at full effort",
+      "game_ready": "strict polycount + full LOD chain for real-time engines",
+      "cinematic": "maximum detail for offline rendering, no polycount limit"
+    },
+    "parameters": {
+      "quality": "draft|standard|high|ultra|game_ready|cinematic",
+      "target_polycount": "int or 'auto'",
+      "texture_resolution": "512..8192",
+      "export_formats": "list of glb|gltf|obj|fbx|stl|ply|usd|usda|usdz",
+      "units": "normalized|meters|centimeters|millimeters",
+      "subject_height_m": "real height in metres (for metric export)",
+      "style": "keep the supplied style; 'stylized' avoids photorealistic post-processing",
+      "generate_uvs": "bool",
+      "generate_pbr": "bool",
+      "generate_rig": "bool (humanoid/creature)",
+      "generate_lods": "bool",
+      "lod_levels": "int",
+      "generate_previews": "bool",
+      "symmetry": "auto|none|x|y|z",
+      "material_overrides": "{name: {...}} forced materials/colours",
+      "perform_refinement": "bool (reference comparison + similarity refinement)",
+      "stages": "optional subset of stage names",
+      "defaults": {
+        "quality": "standard",
+        "preset": "",
+        "style": "realistic",
+        "geometry": "auto",
+        "texture_resolution": 0,
+        "target_polycount": "auto",
+        "preserve_sharp_edges": true,
+        "symmetry": "auto",
+        "generate_uvs": true,
+        "generate_pbr": true,
+        "generate_rig": false,
+        "generate_lods": true,
+        "lod_levels": 0,
+        "generate_previews": true,
+        "generate_pointcloud": true,
+        "photo_consistency": true,
+        "material_request": "",
+        "material": "",
+        "subject_type": "auto",
+        "refine_passes": -1,
+        "compare_renders": 0,
+        "export_formats": [
+          "glb",
+          "obj"
+        ],
+        "units": "normalized",
+        "subject_height_m": 0.0,
+        "seed": 0,
+        "backend": "auto",
+        "force_stages": [],
+        "skip_stages": [],
+        "label": "",
+        "notes": ""
+      }
+    },
+    "output_tree": {
+      "final/": "the model itself (glb/obj/mtl/fbx/stl/ply/usd/usdz as requested)",
+      "textures/": "basecolor, normal, roughness, metallic, ao, packed orm",
+      "lod/": "lod0..lod3 meshes",
+      "materials/": "materials.json (PBR parameters, evidence, overrides)",
+      "rig/": "rig.json, skin_weights.npz, skin.json",
+      "previews/": "stills, turntable.gif, wireframe/normal/uv/coverage renders",
+      "renders/": "full-resolution reference-angle renders used for comparison",
+      "reports/": "quality.json, statistics.json, stages.json, reference_comparison.json, image_quality.json, validation_report.json",
+      "intermediate/": "point cloud, carved volume info, per-stage reports",
+      "version.json": "everything this version was built from and with"
+    },
+    "export_formats": [
+      "fbx",
+      "glb",
+      "gltf",
+      "obj",
+      "ply",
+      "stl",
+      "usd",
+      "usda",
+      "usdz"
+    ],
+    "materials": [
+      "brushed_metal",
+      "car_paint",
+      "carbon_fiber",
+      "ceramic",
+      "cloth",
+      "concrete",
+      "copper",
+      "glass",
+      "gold",
+      "leather",
+      "matte_plastic",
+      "metal",
+      "paint",
+      "painted_metal",
+      "plastic",
+      "rubber",
+      "skin",
+      "stone",
+      "wood"
+    ],
+    "lod_ratios": [
+      1.0,
+      0.5,
+      0.25,
+      0.125
+    ],
+    "backends": {
+      "backends": [
+        {
+          "name": "colmap",
+          "available": false,
+          "kind": "none",
+          "version": "",
+          "path": "",
+          "license": "BSD-3-Clause",
+          "purpose": "structure-from-motion camera solve",
+          "notes": "not installed; the engine falls back to its silhouette-based camera solver (works for ring-style reference sets)"
+        },
+        {
+          "name": "blender",
+          "available": false,
+          "kind": "none",
+          "version": "",
+          "path": "",
+          "license": "GPL-2.0-or-later",
+          "purpose": "binary FBX export, renders, optional post-processing",
+          "notes": "not installed; ASCII FBX is still exported by the engine itself (importable by Blender/Unity/Unreal/Godot)"
+        },
+        {
+          "name": "open3d",
+          "available": false,
+          "kind": "none",
+          "version": "",
+          "path": "",
+          "license": "MIT",
+          "purpose": "fast decimation, Poisson meshing, point-cloud filters",
+          "notes": "not installed (optional quality boost)"
+        },
+        {
+          "name": "onnxruntime",
+          "available": true,
+          "kind": "python",
+          "version": "1.30.0",
+          "path": "",
+          "license": "MIT",
+          "purpose": "local neural models (depth/segmentation) from the model manager",
+          "notes": ""
+        },
+        {
+          "name": "torch",
+          "available": false,
+          "kind": "none",
+          "version": "",
+          "path": "",
+          "license": "BSD-3-Clause",
+          "purpose": "GPU acceleration for optional models",
+          "notes": "not installed (CPU-only pipeline)"
+        },
+        {
+          "name": "xatlas",
+          "available": true,
+          "kind": "python",
+          "version": "0.0.11",
+          "path": "",
+          "license": "MIT",
+          "purpose": "production UV unwrapping",
+          "notes": ""
+        },
+        {
+          "name": "fast_simplification",
+          "available": true,
+          "kind": "python",
+          "version": "0.2.0",
+          "path": "",
+          "license": "MIT",
+          "purpose": "fast quadric mesh decimation",
+          "notes": ""
+        }
+      ],
+      "summary": {
+        "colmap": "silhouette rig solver",
+        "blender": "not used (not required)",
+        "decimation": "fast_simplification",
+        "uv": "xatlas",
+        "depth": "multi-view plan-sweep (classical, always available)",
+        "segmentation": "classical threshold/saliency+grabcut (always available)",
+        "gpu": "CPU"
+      },
+      "available_count": 3
+    },
+    "gpu_required": false,
+    "offline_capable": true,
+    "external_generative_ai": false
+  },
+  "quickstart": {
+    "demo_dataset": "python scripts/make_demo_dataset.py --out ./demo/refs --views 9 --masks",
+    "run": [
+      "recon3d create demo --subject robot",
+      "recon3d add-images demo ./demo/refs",
+      "recon3d reconstruct demo --preset standard --formats glb,obj --json"
+    ],
+    "verify": [
+      "pytest -q",
+      "python scripts/e2e_check.py --preset draft"
+    ]
+  },
+  "documentation": {
+    "readme": "README.md",
+    "install": "docs/INSTALL.md",
+    "cli": "docs/CLI.md",
+    "api": "docs/API.md",
+    "mcp": "docs/MCP.md",
+    "agent_usage": "docs/AGENT_USAGE.md",
+    "architecture": "docs/ARCHITECTURE.md",
+    "troubleshooting": "docs/TROUBLESHOOTING.md",
+    "model_management": "docs/MODEL_MANAGEMENT.md",
+    "licenses": "docs/LICENSES.md",
+    "agent_bootstrap": "AGENT_INSTALL.md"
+  },
+  "policy": {
+    "no_external_generative_ai": true,
+    "no_shell_execution_required": true,
+    "sandboxed_project_directories": true,
+    "destructive_operations_require_confirmation": true,
+    "honest_quality_reporting": "Every quality number in reports/ is measured from the produced files. Unobserved texture regions are reported as missing rather than invented, and a failed stage degrades instead of silently emitting a worse model."
+  }
+}

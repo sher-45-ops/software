@@ -1,0 +1,22 @@
+{
+  "name": "draft",
+  "description": "Fast preview. Fewer carve levels, no photometric pass, low-res textures.",
+  "performance_mode": "draft",
+  "params": {
+    "geometry": "low",
+    "texture_resolution": 1024,
+    "target_polycount": 15000,
+    "generate_lods": false,
+    "generate_pbr": true,
+    "photo_consistency": false,
+    "refine_passes": 0,
+    "lod_levels": 2,
+    "export_formats": [
+      "glb"
+    ]
+  },
+  "policy": {
+    "target_polycount": "force",
+    "texture_resolution": "force"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "description": "Optional local models Recon3D can use. Nothing here is required: the engine ships a complete classical CPU pipeline. Every entry is an open-source model that runs locally with no API key and no cloud service. Licences are recorded per model so you can decide what is acceptable for your project.",
+  "models": [
+    {
+      "id": "depth_anything_v2_small",
+      "name": "Depth Anything V2 (Small)",
+      "purpose": "Monocular depth prior for denser point clouds and better concave detail",
+      "stage": "depth_estimation",
+      "runtime": "onnxruntime",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/DepthAnything/Depth-Anything-V2/blob/main/LICENSE",
+      "homepage": "https://github.com/DepthAnything/Depth-Anything-V2",
+      "size_mb": 99,
+      "files": [
+        {
+          "name": "depth_anything_v2_vits.onnx",
+          "url": "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx",
+          "sha256": "",
+          "optional": true,
+          "note": "Community ONNX export of the Apache-2.0 Small checkpoint. The checksum is recorded after the first successful download; supply your own export if you prefer."
+        }
+      ],
+      "notes": "Only the Small checkpoint is Apache-2.0. Base/Large/Giant are CC-BY-NC-4.0 and are deliberately NOT offered."
+    },
+    {
+      "id": "u2netp_salient",
+      "name": "U2Net-p salient object detection",
+      "purpose": "Alternative background removal for busy/transparent reference images",
+      "stage": "segmentation",
+      "runtime": "onnxruntime",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/xuebinqin/U-2-Net/blob/master/LICENSE",
+      "homepage": "https://github.com/xuebinqin/U-2-Net",
+      "size_mb": 4,
+      "files": [
+        {
+          "name": "u2netp.onnx",
+          "url": "https://huggingface.co/tomjackson2023/rembg/resolve/main/u2netp.onnx",
+          "sha256": "",
+          "optional": true
+        }
+      ],
+      "notes": "Small (4 MB) salient-object model; useful when the background is not a plain colour."
+    }
+  ],
+  "download_policy": {
+    "requires": ["allow_network_downloads", "offline == false"],
+    "checksum": "sha256 recorded on first download, verified on every use afterwards",
+    "never": "no model is fetched implicitly during a reconstruction; `recon3d models download` is explicit"
+  }
+}
