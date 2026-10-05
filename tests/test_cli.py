@@ -111,3 +111,61 @@ def test_full_reconstruction_through_the_cli(cli_root, reference_dir):
     assert (version_dir / "final").exists()
     assert list((version_dir / "final").glob("*.glb"))
     assert (version_dir / "reports" / "quality.json").exists()
+
+
+def test_rest_health_and_project_lifecycle(cli_root):
+    """The REST API must answer /health and return serialisable JSON payloads.
+
+    Skipped when the optional ``api`` extra is not installed; the CLI path it
+    exercises works without FastAPI.
+    """
+    import time
+    import urllib.error
+    import urllib.request
+
+    pytest.importorskip("fastapi")
+    pytest.importorskip("uvicorn")
+
+    port = 8791
+    env = {**os.environ, "RECON3D_HOME": str(cli_root),
+           "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    server = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "--factory", "recon3d.api.server:create_app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "error"],
+        env=env, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.time() + 30
+        health = None
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=5) as r:
+                    health = json.loads(r.read())
+                break
+            except Exception:
+                time.sleep(0.5)
+        assert health is not None, "the API never became reachable"
+        assert health["ok"] is True and health["version"]
+        assert isinstance(health["active_jobs"], int)
+
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/projects", method="POST",
+            data=json.dumps({"name": "rest-check", "subject_type": "robot"}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(request, timeout=15) as r:
+            created = json.loads(r.read())
+        project_id = (created.get("project") or created).get("id")
+        assert project_id
+
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/projects/missing", timeout=10)
+            raise AssertionError("a missing project must not return 200")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            body = json.loads(exc.read())
+            assert body["ok"] is False and body["code"] == "not_found"
+    finally:
+        server.terminate()
+        try:
+            server.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover
+            server.kill()

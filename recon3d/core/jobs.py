@@ -275,7 +275,9 @@ class JobManager:
             time.sleep(0.05)
         return job
 
+    @property
     def active_count(self) -> int:
+        """Number of queued or running jobs (plain attribute, JSON-serialisable)."""
         return sum(1 for j in self.list() if j.state in {JobState.RUNNING, JobState.QUEUED})
 
 
