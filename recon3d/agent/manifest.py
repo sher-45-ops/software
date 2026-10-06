@@ -58,6 +58,48 @@ OUTPUT_TREE: Dict[str, str] = {
 }
 
 
+#: One-line description per pipeline parameter.  ``test_manifest.py`` fails when a
+#: parameter exists in ``DEFAULT_PARAMS`` without an entry here, so agents never
+#: discover features they cannot name (or names they cannot use).
+PARAMETER_DESCRIPTIONS: Dict[str, str] = {
+    "quality": "draft|standard|high|ultra|game_ready|cinematic",
+    "preset": "explicit preset name; wins over 'quality'",
+    "style": "keep the supplied style; 'stylized' avoids photorealistic post-processing",
+    "geometry": "low|medium|high|auto - carve fidelity before the preset budget",
+    "texture_resolution": "512..8192 (clamped by hardware, reported)",
+    "target_polycount": "int or 'auto' - triangle budget for the exported mesh",
+    "preserve_sharp_edges": "bool - keep mechanical/hard edges instead of smoothing them away",
+    "symmetry": "auto|none|on|x|y|z - enforce a mirror plane when the subject has one",
+    "generate_uvs": "bool",
+    "generate_pbr": "bool - derive normal/roughness/metallic/AO maps",
+    "generate_rig": "bool - skeleton + skin weights (humanoid/creature)",
+    "generate_lods": "bool",
+    "lod_levels": "int (0 -> from the preset)",
+    "generate_previews": "bool - turntable/reference previews into previews/",
+    "generate_pointcloud": "bool - write the multi-view point cloud as an intermediate",
+    "photo_consistency": "bool - reject silhouette voxels whose colour disagrees across views",
+    "material_request": "free text, e.g. 'brushed steel with red paint'",
+    "material": "material name from the built-in library (see 'materials')",
+    "subject_type": "auto|character_humanoid|character_creature|robot_mech|animal|unknown",
+    "refine_passes": "int; reference-comparison refinement passes (0 disables, -1 -> preset)",
+    "compare_renders": "int; reference views rendered into renders/ for inspection (0 -> preset)",
+    "export_formats": "list of glb|gltf|obj|fbx|stl|ply|usd|usda|usdz",
+    "units": "normalized|meters|centimeters|millimeters",
+    "subject_height_m": "real height in metres (for metric export)",
+    "seed": "int - seeds the pipeline's sampling for reproducible runs",
+    "backend": "auto|numpy|<optional backend> - decimation/UV backend preference",
+    "stage_retries": "int, extra attempts for a transient stage failure (default 1)",
+    "force_stages": "list of stage names to rebuild even if cached",
+    "skip_stages": "list of stage names to skip",
+    "stages": "optional subset of stage names to run",
+    "label": "text - label stored on the produced version",
+    "notes": "text - operator notes stored on the produced version",
+    "material_overrides": "{name: {...}} forced materials/colours",
+    "perform_refinement": "bool (reference comparison + similarity refinement)",
+    "defaults": "the full default parameter set",
+}
+
+
 def capability_report() -> Dict[str, Any]:
     """Full, serialisable description of the engine's capabilities."""
     from ..core.pipeline import DEFAULT_PARAMS, STAGE_PROGRESS_NAMES
@@ -76,28 +118,7 @@ def capability_report() -> Dict[str, Any]:
         "stages": [{"name": name, "description": STAGE_DESCRIPTIONS.get(name, "")}
                    for name in STAGE_PROGRESS_NAMES],
         "presets": PRESET_DESCRIPTIONS,
-        "parameters": {
-            "quality": "draft|standard|high|ultra|game_ready|cinematic",
-            "target_polycount": "int or 'auto'",
-            "texture_resolution": "512..8192",
-            "export_formats": "list of glb|gltf|obj|fbx|stl|ply|usd|usda|usdz",
-            "units": "normalized|meters|centimeters|millimeters",
-            "subject_height_m": "real height in metres (for metric export)",
-            "style": "keep the supplied style; 'stylized' avoids photorealistic post-processing",
-            "generate_uvs": "bool",
-            "generate_pbr": "bool",
-            "generate_rig": "bool (humanoid/creature)",
-            "generate_lods": "bool",
-            "lod_levels": "int",
-            "generate_previews": "bool",
-            "symmetry": "auto|none|x|y|z",
-            "material_overrides": "{name: {...}} forced materials/colours",
-            "perform_refinement": "bool (reference comparison + similarity refinement)",
-            "stages": "optional subset of stage names",
-            "stage_retries": "int, extra attempts for a transient stage failure (default 1)",
-            "force_stages": "list of stage names to rebuild even if cached",
-            "defaults": DEFAULT_PARAMS,
-        },
+        "parameters": dict(PARAMETER_DESCRIPTIONS, defaults=DEFAULT_PARAMS),
         "outputs": OUTPUT_TREE,
         "formats": sorted(SUPPORTED_FORMATS),
         "materials": sorted(MATERIAL_LIBRARY.keys()),

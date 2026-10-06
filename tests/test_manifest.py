@@ -1,0 +1,124 @@
+"""Documentation/manifest drift guards.
+
+`agent-manifest.json`, `recon3d info` and the docs are what an external agent reads
+*before* it has any other information about the engine. If they drift away from the
+code, an agent will call commands that do not exist or pass parameters the pipeline
+ignores - so the manifest is checked against the real CLI parser, the real HTTP
+routes and the real default parameters here.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+MANIFEST = ROOT / "agent-manifest.json"
+
+
+@pytest.fixture(scope="module")
+def manifest() -> dict:
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def test_manifest_is_valid_and_describes_this_version(manifest):
+    import recon3d
+
+    assert manifest["version"] == recon3d.VERSION
+    assert manifest["name"] == "recon3d"
+    assert manifest["license"], "the manifest must state the licence"
+    repository = manifest["repository"]
+    url = repository["url"] if isinstance(repository, dict) else repository
+    assert url.startswith("https://github.com/")
+    for key in ("summary", "install", "quickstart", "interfaces", "policy", "capabilities"):
+        assert manifest.get(key), f"the manifest is missing '{key}'"
+
+
+def test_manifest_cli_commands_match_the_real_parser(manifest):
+    from recon3d.cli.main import build_parser
+
+    parser = build_parser()
+    # The sub-parser is the first positional group; argparse exposes it this way.
+    actions = [action for action in parser._actions if action.dest == "command"]
+    assert actions, "the CLI parser exposes no sub-commands"
+    real = set(actions[0].choices or {})
+    documented = set(manifest["interfaces"]["cli"]["commands"])
+    assert real == documented, (
+        f"agent-manifest.json documents {sorted(documented - real)} which the CLI does "
+        f"not provide, and misses {sorted(real - documented)}")
+
+
+def test_manifest_rest_endpoints_match_the_real_app(manifest):
+    fastapi = pytest.importorskip("fastapi")
+    from recon3d.api.server import create_app
+
+    app = create_app()
+    assert isinstance(app, fastapi.FastAPI)
+    schema = app.openapi()
+    real = {f"{method.upper()} {path}" for path, methods in schema["paths"].items()
+            for method in methods}
+    documented = {entry.strip() for entry in manifest["interfaces"]["rest"]["endpoints"]}
+    # A handful of endpoints are documented without the {id}/{job} placeholder names
+    # used by FastAPI, so normalise the parameters before comparing.
+    def normalise(endpoint: str) -> str:
+        method, _, path = endpoint.partition(" ")
+        path = "/".join(("{id}" if part.startswith("{") else part) for part in path.split("/"))
+        return f"{method} {path}"
+
+    missing = {normalise(entry) for entry in documented} - {normalise(entry) for entry in real}
+    assert not missing, f"agent-manifest.json documents non-existent endpoints: {sorted(missing)}"
+
+    for endpoint in ("GET /health", "POST /v1/projects/{id}/reconstruct",
+                     "POST /v1/jobs/{id}/cancel", "GET /v1/jobs/{id}/artifacts/{path}"):
+        assert normalise(endpoint) in {normalise(entry) for entry in real}, endpoint
+
+
+def test_capability_report_documents_every_pipeline_parameter(manifest):
+    from recon3d.agent.manifest import capability_report
+    from recon3d.core.pipeline import DEFAULT_PARAMS
+
+    report = capability_report()
+    documented = set(report["parameters"])
+    documented.update(manifest["capabilities"]["parameters"])
+    undocumented = {key for key in DEFAULT_PARAMS
+                    if key not in documented and not key.startswith("_")}
+    assert not undocumented, (
+        f"these pipeline parameters are accepted but never documented for agents: "
+        f"{sorted(undocumented)}")
+
+
+def test_manifest_recovery_and_policy_claims_are_real(manifest):
+    """The promises the manifest makes must exist in the CLI and in the code."""
+    from recon3d.cli.main import build_parser
+
+    actions = [action for action in build_parser()._actions if action.dest == "command"]
+    commands = set(actions[0].choices or {})
+    for command in ("jobs", "cancel", "retry"):
+        assert command in commands, f"'{command}' is advertised for recovery but missing"
+
+    recovery = manifest["capabilities"]["recovery"]
+    assert {"checkpoints", "resume", "cancel", "retry"} <= set(recovery)
+
+    from recon3d.core.pipeline import DEFAULT_PARAMS
+
+    assert "stage_retries" in DEFAULT_PARAMS, "the manifest documents a retry budget"
+
+    policy = manifest["policy"]
+    assert policy["no_external_generative_ai"] is True
+    assert policy["destructive_operations_require_confirmation"] is True
+    # The engine really does refuse a delete without confirmation.
+    import tempfile
+
+    from recon3d.config import load_config
+    from recon3d.core.project import ProjectManager
+    from recon3d.errors import SecurityError
+
+    root = Path(tempfile.mkdtemp())
+    cfg = load_config(data_root=str(root / "data"))
+    cfg.ensure_dirs()
+    manager = ProjectManager(cfg.projects_path)
+    manager.create("guarded", subject_type="robot")
+    with pytest.raises(SecurityError):
+        manager.delete("guarded")

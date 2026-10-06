@@ -57,7 +57,9 @@ First release: a complete, local-first multi-view image-to-3D reconstruction eng
 - New tests: checkpoint/resume (`tests/test_resume.py`), cross-process cancellation and
   retry (`tests/test_robustness.py`), REST-only workflow incl. multipart upload, artefact
   download and the model registry (`tests/test_rest_workflow.py`), WebSocket progress
-  (`tests/test_api_ws.py`).
+  (`tests/test_api_ws.py`), and documentation drift guards (`tests/test_manifest.py`:
+  the CLI command list, the REST endpoints, the recovery promises and every pipeline
+  parameter are checked against the code, so `agent-manifest.json` cannot go stale).
 
 ### Added
 
