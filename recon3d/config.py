@@ -123,8 +123,17 @@ class Config:
             p.mkdir(parents=True, exist_ok=True)
 
     # -- serialisation -------------------------------------------------
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, redact: bool = False) -> Dict[str, Any]:
+        """Serialise the configuration (``redact`` masks anything credential-like).
+
+        ``redact=False`` is what :func:`save_config` uses - the file lives in the
+        user's own data root and has to be complete to be reloadable.  Redaction
+        exists for diagnostics that end up in logs or bug reports.
+        """
         data = asdict(self)
+        if redact:
+            data["extra"] = {key: ("***" if _looks_secret(key) else value)
+                             for key, value in (data.get("extra") or {}).items()}
         data["resolved"] = {
             "projects_dir": str(self.projects_path),
             "cache_dir": str(self.cache_path),
@@ -241,6 +250,15 @@ def temp_dir(prefix: str = "recon3d-") -> Path:
     return Path(tempfile.mkdtemp(prefix=prefix))
 
 
+#: Substrings that mark an ``extra`` key as credential-like.
+SECRET_KEY_PARTS = ("token", "secret", "password", "key", "credential")
+
+
+def _looks_secret(key: str) -> bool:
+    lowered = str(key).lower()
+    return any(part in lowered for part in SECRET_KEY_PARTS)
+
+
 def save_config(config: "Config", path: Optional[Path] = None) -> Path:
     """Persist *config* to ``<data_root>/config.json`` (or an explicit path).
 
@@ -249,6 +267,8 @@ def save_config(config: "Config", path: Optional[Path] = None) -> Path:
     """
     target = Path(path) if path else Path(config.data_root).expanduser() / "config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = config.to_dict(redact=False) if hasattr(config, "to_dict") else asdict(config)
+    payload = asdict(config)
+    if isinstance(config, Config):
+        payload = config.to_dict(redact=False)
     target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return target

@@ -169,3 +169,41 @@ def test_rest_health_and_project_lifecycle(cli_root):
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:  # pragma: no cover
             server.kill()
+
+
+def test_documented_first_run_path_works(tmp_path, monkeypatch, capsys):
+    """`setup` -> `create` -> `add-images` is step 1 of every install guide.
+
+    It broke once (save_config called Config.to_dict(redact=...) which did not exist),
+    and nothing covered it, so the whole quickstart was dead on a fresh machine. Run
+    the documented sequence end to end against an empty data root.
+    """
+    monkeypatch.setenv("RECON3D_HOME", str(tmp_path / "fresh-home"))
+    from recon3d.cli import main as cli
+
+    assert cli.main(["setup", "--json"]) == 0
+    setup = json.loads(capsys.readouterr().out)
+    assert Path(setup["data_root"]).is_dir()
+    assert (Path(setup["data_root"]) / "config.json").exists()
+
+    # The written configuration has to load back to the same data root.
+    from recon3d.config import load_config
+
+    assert str(load_config().data_root) == str(setup["data_root"])
+
+    assert cli.main(["create", "quickstart", "--subject", "robot", "--json"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert created["id"]
+
+    from PIL import Image
+
+    reference = tmp_path / "front.png"
+    Image.new("RGB", (64, 64), (200, 40, 40)).save(reference)
+    assert cli.main(["add-images", "quickstart", str(reference), "--json"]) == 0
+    added = json.loads(capsys.readouterr().out)
+    assert added["total"] == 1
+
+    # `doctor` is the other half of the documented first run.
+    assert cli.main(["doctor", "--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert doctor.get("ok") is True or doctor.get("version")

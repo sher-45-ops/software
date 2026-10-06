@@ -27,6 +27,11 @@ First release: a complete, local-first multi-view image-to-3D reconstruction eng
   lives inside `input/original` - exactly what the REST upload path does.
 - `GET /health` returned 500 because `JobManager.active_count` was serialised as a bound
   method; it is a property again.
+- **`recon3d setup` crashed on a fresh machine**: `save_config` called
+  `Config.to_dict(redact=False)` while `to_dict` took no arguments, so the first command of
+  every install guide raised `TypeError` on an empty data root. `to_dict(redact=...)` now
+  exists (redaction masks credential-like `extra` keys for diagnostics) and the documented
+  `setup -> create -> add-images -> doctor` path is covered by a test.
 - WebSocket progress (`/v1/ws/jobs/{id}`) failed with HTTP 403: FastAPI could not resolve
   annotations that were only imported inside functions. Every name in an annotation is now
   importable at module scope.
