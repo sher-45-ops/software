@@ -16,6 +16,13 @@ on:
 permissions:
   contents: write
 
+# One run at a time.  A tag push and a branch push now happen together, and two
+# runs uploading to the same release with `--clobber` delete each other's assets
+# (the delete/upload pair is not atomic), so they are serialised instead.
+concurrency:
+  group: release-artifacts
+  cancel-in-progress: false
+
 jobs:
   build-and-attach:
     runs-on: ubuntu-latest
