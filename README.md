@@ -69,7 +69,7 @@ recon3d reconstruct demo --preset draft
 
 | Interface | How | Docs |
 | --- | --- | --- |
-| **CLI** | `recon3d doctor \| create \| add-images \| reconstruct \| status \| versions \| export \| serve \| studio \| models \| info \| projects \| project \| setup`, every command supports `--json` | [docs/CLI.md](docs/CLI.md) |
+| **CLI** | `recon3d doctor \| create \| add-images \| reconstruct \| status \| jobs \| cancel \| retry \| versions \| export \| serve \| studio \| models \| info \| projects \| project \| setup`, every command supports `--json` | [docs/CLI.md](docs/CLI.md) |
 | **REST + WebSocket** | `recon3d serve --port 8760` → `POST /v1/projects/{id}/reconstruct`, `GET /v1/jobs/{id}`, `WS /v1/ws/jobs/{id}` | [docs/API.md](docs/API.md) |
 | **Studio (web UI)** | `recon3d studio` → browser at `http://127.0.0.1:8760` | [docs/API.md](docs/API.md) |
 | **MCP server** | `python -m recon3d.mcpserver` → tools `recon3d_doctor`, `recon3d_create_project`, `recon3d_reconstruct`, `recon3d_job_status`, `recon3d_list_outputs` | [docs/MCP.md](docs/MCP.md) |
@@ -159,18 +159,24 @@ through the public API and checks the produced files — scores are read from
 
 | Measurement | Value |
 | --- | --- |
-| Overall quality | **85.2 / 100 (good)** — geometry 85.7, reference similarity 94.0, mesh health 68.0, texture 82.0 |
+| Overall quality | **96.3 / 100 (excellent)** — geometry 99.7, reference similarity 94.0, mesh health 100.0, texture 82.0 |
 | Mean silhouette IoU (8 ring views vs ground truth) | **0.8955** (min 0.8713) |
 | Mean colour RMSE / coverage delta | 0.1677 / −0.0142 |
 | Exported mesh | 62 018 vertices / **124 032 triangles**, **1 component, watertight, genus 0** |
 | Textures | 1024² basecolor, normal, roughness, metallic, AO, packed ORM |
 | UV atlas | 807 islands, mean distortion 0.236 |
 | LODs | 3 (124 032 / 62 016 / 31 008 triangles) |
-| End-to-end wall clock | 1 537–1 877 s (~26–31 min) for the standard preset at 224³ carving |
+| End-to-end wall clock | 1 188 s (~20 min) for the standard preset at 224³ carving, machine otherwise idle |
 | Gate result | `RESULT: PASS` (job completed, no failed stages, mesh + textures + GLB verified) |
 
-Two rows are worth reading as *behaviour*, not just numbers — both are decisions the engine
-made against its own candidate geometry, and both are recorded verbatim in
+The full report of that run ships with the release (`recon3d-e2e-report-v1.0.0.json`) and in
+`.e2e/e2e-standard.json` if you run the gate yourself — every number above is read back out of
+`reports/quality.json` / `reports/statistics.json`, never supplied by hand. Health metrics are
+measured on a welded copy of the surface, so the UV seam split (807 islands) is not mistaken
+for loose components.
+
+Three rows are worth reading as *behaviour*, not just numbers — each is a decision the engine
+made against its own candidate geometry, and each is recorded verbatim in
 `reports/stages.json`:
 
 - The silhouette refinement **rejected its own candidate**: the rotation-only refinement
@@ -178,7 +184,9 @@ made against its own candidate geometry, and both are recorded verbatim in
   0.8999 against the original solve's 0.9037, so the original cameras and mesh were kept.
 - The depth sweep's volume fusion was **not accepted** either: the fused surface scored
   0.797 against the silhouette hull's 0.9037, so the hull survived and the depth point cloud
-  stayed a diagnostic artefact (`reports/statistics.json`).
+  stayed a diagnostic artefact (`reports/stages.json` → `mesh_reconstruction.depth`).
+- The reference-comparison alignment pass ran, measured **no** improvement (0.8813 → 0.8813)
+  and therefore returned the model untouched rather than "improving" it.
 
 That is the contract: the engine ships the geometry that measures best against your
 references, and reports what it discarded and why.

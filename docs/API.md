@@ -65,8 +65,9 @@ the server).
 | --- | --- | --- |
 | `POST` | `/v1/projects/{id}/reconstruct` | pipeline parameters (`preset`, `texture_resolution`, `target_polycount`, `export_formats`, `generate_rig`, `stages`, …); returns `{"job": {...}}` |
 | `GET` | `/v1/jobs?project=hero` | all jobs, optionally filtered |
-| `GET` | `/v1/jobs/{job}?events=50` | state, progress, stage table, recent events, `result` when finished |
-| `POST` | `/v1/jobs/{job}/cancel` | cooperative cancel; the current stage stops at its next checkpoint |
+| `GET` | `/v1/jobs/{job}?events=50` | state, progress, stage table, recent events, `resumable`, `result` when finished |
+| `GET` | `/v1/jobs/{job}` (failed/cancelled) | `resumable: true` means re-running the same request - or `recon3d retry {job}` - continues from the surviving checkpoints instead of restarting |
+| `POST` | `/v1/jobs/{job}/cancel` | cooperative cancel; the job stops at its next stage boundary and keeps every finished checkpoint. The same request can be made from another process with `recon3d cancel {job}` |
 | `GET` | `/v1/jobs/{job}/artifacts` | every produced file with sizes and download URLs |
 | `GET` | `/v1/jobs/{job}/artifacts/{path}` | download one artefact (path is confined to the version directory) |
 | `POST` | `/v1/export` | `{"project": "hero", "version": "v001", "formats": ["fbx","usdz"], "output_dir": "…"}` — re-export without re-running |

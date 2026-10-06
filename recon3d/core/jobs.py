@@ -10,6 +10,7 @@ follow-up job that only changes texture resolution re-uses the mesh.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 import traceback
@@ -19,7 +20,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..errors import CancelledError, NotFoundError, Recon3DError, StageError
+from ..errors import (CancelledError, ConflictError, NotFoundError, Recon3DError,
+                     StageError)
 from .progress import CancellationToken, ProgressEvent, ProgressReporter, STAGES, utc_now
 from .store import read_json, write_json
 
@@ -153,11 +155,49 @@ class JobManager:
             job.checkpoint_dir = str(project_obj.intermediate_dir)
         elif self.log_dir is not None:
             events_path = self.log_dir / f"{job_id}.jsonl"
+        # Cross-process cancellation: another process (the CLI, a supervising
+        # agent) can ask this job to stop by touching <jobs dir>/<id>.cancel.
+        job.token.watch_file(self.cancel_request_path(job))
         job.reporter = ProgressReporter(project=project, job=job_id, events_path=events_path,
                                         token=job.token)
         with self._lock:
             self._jobs[job_id] = job
         return job
+
+    def cancel_request_path(self, job: Job) -> Path:
+        """Path of the cancel-request file that a *different* process can touch."""
+        base = Path(job.checkpoint_dir) if job.checkpoint_dir else (
+            self.log_dir if self.log_dir is not None else Path.cwd() / ".recon3d-jobs")
+        return Path(base) / "jobs" / f"{job.id}.cancel"
+
+    def request_cancel(self, job_id: str, reason: str = "cancel requested by operator",
+                       checkpoint_dir: Optional[Path] = None) -> Path:
+        """Ask a job to stop, from this process or any other one.
+
+        The request is a file the running job watches, so it works for a job inside
+        the API server, in a CLI run or in a container.  ``checkpoint_dir`` is the
+        directory of the project that owns the job (the CLI reads it from the
+        persisted job record); without it the request goes to ``log_dir``.
+        """
+        job = self._jobs.get(job_id)
+        if job is not None and job.terminal:
+            raise ConflictError(f"job '{job_id}' already finished ({job.state.value})")
+        if job is not None:
+            path = self.cancel_request_path(job)
+        elif checkpoint_dir is not None:
+            path = Path(checkpoint_dir) / "jobs" / f"{job_id}.cancel"
+        else:
+            path = self._cancel_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"job": job_id, "reason": reason, "at": utc_now()}),
+                        encoding="utf-8")
+        if job is not None:
+            job.cancel(reason)
+        return path
+
+    def _cancel_path(self, job_id: str) -> Path:
+        base = Path(self.log_dir) if self.log_dir is not None else Path.cwd() / ".recon3d-jobs"
+        return base / "jobs" / f"{job_id}.cancel"
 
     def get(self, job_id: str) -> Job:
         with self._lock:
@@ -249,17 +289,66 @@ class JobManager:
             unsubscribe()
             job.duration_s = time.time() - started
             job.finished_at = utc_now()
+            try:
+                job.token.request_path().unlink(missing_ok=True)  # type: ignore[union-attr]
+            except OSError:  # pragma: no cover - best effort cleanup
+                pass
             self._persist(job)
 
-    def _persist(self, job: Job) -> None:
-        if not job.checkpoint_dir:
-            return
+    def persisted(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Read a job that an earlier process persisted (if any)."""
+        if self.log_dir is None:
+            return None
+        path = Path(self.log_dir) / "jobs" / f"{job_id}.json"
+        if not path.exists():
+            return None
         try:
-            path = Path(job.checkpoint_dir) / "jobs"
-            path.mkdir(parents=True, exist_ok=True)
-            write_json(path / f"{job.id}.json", job.to_dict())
-        except OSError:  # pragma: no cover
-            pass
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:  # pragma: no cover - damaged file
+            return None
+
+    def persisted_jobs(self) -> List[Dict[str, Any]]:
+        """All persisted jobs, newest first (survives process restarts)."""
+        if self.log_dir is None:
+            return []
+        directory = Path(self.log_dir) / "jobs"
+        if not directory.is_dir():
+            return []
+        jobs: List[Dict[str, Any]] = []
+        for path in sorted(directory.glob("job-*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:  # pragma: no cover - damaged file
+                continue
+            payload["_path"] = str(path)
+            jobs.append(payload)
+        jobs.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+        return jobs
+
+    def _record_dirs(self, job: Job) -> List[Path]:
+        """Where a job record is written: the global log dir *and* the project.
+
+        The log dir (``<data_root>/logs/jobs``) is a single discoverable index for
+        ``recon3d jobs`` / ``recon3d retry``; the project copy keeps the record with
+        the project so the folder stays self-describing when moved off the machine.
+        """
+        dirs: List[Path] = []
+        if self.log_dir is not None:
+            dirs.append(Path(self.log_dir) / "jobs")
+        if job.checkpoint_dir:
+            candidate = Path(job.checkpoint_dir) / "jobs"
+            if candidate not in dirs:
+                dirs.append(candidate)
+        return dirs
+
+    def _persist(self, job: Job) -> None:
+        payload = job.to_dict()
+        for directory in self._record_dirs(job):
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                write_json(directory / f"{job.id}.json", payload)
+            except OSError:  # pragma: no cover - best effort
+                continue
 
     def cancel(self, job_id: str, reason: str = "cancelled by operator") -> Job:
         job = self.get(job_id)

@@ -63,7 +63,35 @@ images ──► ingestion ──► validation ──► segmentation ──►
 State travels in `PipelineContext`, which holds the project, resolved parameters, caches
 for expensive intermediates (images, masks, rig, mesh, UVs, textures) and the stage
 reports. Anything large is written to disk and referenced by path, so a crashed run can be
-resumed (`intermediate/<stage>/_checkpoint.json` records an inputs hash per stage).
+resumed.
+
+### Checkpoints and resume (what the inputs hash contains)
+
+Each stage writes `intermediate/<stage>/_checkpoint.json` with an **inputs hash** and the
+list of artefacts it produced. The hash deliberately contains only genuine inputs:
+
+* the stage name and the **requested** parameters (a snapshot taken before any stage runs -
+  stages do write back what they derive, e.g. the analysed subject type, and hashing those
+  would make a checkpoint unreusable by the next run);
+* the image set (id, path, sha256, view);
+* the **inputs hash of each dependency**, chained Merkle-style.
+
+Nothing measured during the run (vertex counts, solved scale hints, quality scores) takes
+part - measurements belong to the *output*, not the input, and including them would mean a
+stage could never match its own checkpoint. Geometry stages additionally persist their
+surface (`intermediate/<stage>/mesh.ply`), so the expensive carve is never repeated, and
+`checkpoint_valid` verifies the promised artefacts still exist before a checkpoint is
+trusted: missing files invalidate that stage (and only that stage).
+
+A checkpoint records the version files its stage produced as well (textures, rig, LODs,
+comparison renders) - plus the artefacts of the stages it depends on, because a stage cannot
+be resumed without its inputs. When a stage is re-used, those files are copied into the new
+version, so every version stays a complete snapshot of the asset (a fully cached re-run
+takes seconds and yields the same files, numbers and quality report as the original run).
+The `export` stage is the one exception: its files are named after the version and must
+describe *that* version, so it is regenerated - writing a GLB/OBJ from a finished mesh costs
+seconds, not minutes. Mesh health is measured on a welded copy of the surface so UV seam
+splitting is not mistaken for loose components.
 
 ## Camera solve (the part that decides everything)
 
@@ -154,3 +182,10 @@ records itself in the stage report and the pipeline continues with a degraded re
 required stage failure aborts with `stage_failed` and marks the job failed, and a retry
 resumes from the last valid checkpoint. `run_pipeline` never returns a success payload for a
 run that produced no mesh.
+
+A stage that fails for a *transient* reason is retried in place (`stage_retries`, default
+one extra attempt, with the attempt count recorded in the stage report); input errors,
+sandbox refusals and cancellations fail fast because retrying them cannot change the
+outcome. Cancellation is cooperative and works across processes: jobs watch a request file
+next to their state, so `recon3d cancel` from any terminal - or `POST /v1/jobs/{id}/cancel`
+- stops the run at the next stage boundary and keeps every finished checkpoint.

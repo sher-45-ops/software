@@ -62,6 +62,9 @@
         "project",
         "reconstruct",
         "status",
+        "retry",
+        "cancel",
+        "jobs",
         "versions",
         "export",
         "serve",
@@ -245,7 +248,9 @@
         "skip_stages": [],
         "label": "",
         "notes": ""
-      }
+      },
+      "stage_retries": "int, extra attempts for a transient stage failure (default 1)",
+      "force_stages": "list of stage names to rebuild even if cached"
     },
     "output_tree": {
       "final/": "the model itself (glb/obj/mtl/fbx/stl/ply/usd/usdz as requested)",
@@ -383,7 +388,15 @@
     },
     "gpu_required": false,
     "offline_capable": true,
-    "external_generative_ai": false
+    "external_generative_ai": false,
+    "recovery": {
+      "checkpoints": "per stage, keyed by a hash of the requested parameters, the image set and the dependencies' input hashes",
+      "resume": "re-run the same command; cached stages are re-used and only the missing work runs",
+      "list_jobs": "recon3d jobs [--project ID] --json  (includes runs from earlier processes)",
+      "cancel": "recon3d cancel JOB  (works across processes; finished stages are kept)",
+      "retry": "recon3d retry JOB [--stages ...] [--force-stage ...]  (resumes from checkpoints)",
+      "retries": "stage_retries (default 1) retries transient stage failures; input errors are never retried"
+    }
   },
   "quickstart": {
     "demo_dataset": "python scripts/make_demo_dataset.py --out ./demo/refs --views 9 --masks",
@@ -415,6 +428,7 @@
     "no_shell_execution_required": true,
     "sandboxed_project_directories": true,
     "destructive_operations_require_confirmation": true,
-    "honest_quality_reporting": "Every quality number in reports/ is measured from the produced files. Unobserved texture regions are reported as missing rather than invented, and a failed stage degrades instead of silently emitting a worse model."
+    "honest_quality_reporting": "Every quality number in reports/ is measured from the produced files. Unobserved texture regions are reported as missing rather than invented, and a failed stage degrades instead of silently emitting a worse model.",
+    "resumable_jobs": "A run that is cancelled, crashed or killed keeps every finished stage; `recon3d jobs` lists resumable runs and `recon3d retry` continues them. Checkpoints explicitly never claim work that was not done."
   }
 }

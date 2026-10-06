@@ -39,6 +39,21 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# Names that appear in *annotations* must live in module scope: this file uses
+# ``from __future__ import annotations``, so FastAPI resolves the annotation
+# strings against the module globals with ``typing.get_type_hints``.  Names
+# imported inside ``create_app`` are invisible to it, and FastAPI then treats the
+# parameter as a required query field - which silently broke the WebSocket
+# channel (``/v1/ws/jobs/{id}`` answered 403) and multipart image upload.
+try:  # optional extra: ``pip install "recon3d[api]"``
+    from fastapi import UploadFile, WebSocket, WebSocketDisconnect  # noqa: F401
+    from fastapi.responses import HTMLResponse  # noqa: F401
+except Exception:  # pragma: no cover - the CLI works without the API extra
+    UploadFile = Any  # type: ignore[assignment,misc]
+    WebSocket = Any  # type: ignore[assignment,misc]
+    WebSocketDisconnect = Exception  # type: ignore[assignment,misc]
+    HTMLResponse = Any  # type: ignore[assignment,misc]
+
 from .. import VERSION
 from ..config import load_config
 from ..core.project import ProjectManager
@@ -64,8 +79,8 @@ def _json_safe(value: Any) -> Any:
 
 def create_app(config=None):
     """Build the FastAPI application (imported lazily so the CLI stays light)."""
-    from fastapi import Body, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    from fastapi import Body, FastAPI, File, HTTPException
+    from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 
     cfg = config or load_config()

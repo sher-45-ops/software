@@ -81,12 +81,32 @@ completes. If the warning names an error, that is a bug worth reporting with the
 **Job seems stuck**
 Long stages (`texture` on 8192² maps, `ultra` carving) can take many minutes. Watch with
 `recon3d status PROJECT --watch`, the WebSocket, or `recon3d status PROJECT` for per-stage
-timings. Cancel with Ctrl+C / `POST /v1/jobs/{id}/cancel`; checkpoints survive.
+timings. Cancel with Ctrl+C, `recon3d cancel <job-id>` from any terminal, or
+`POST /v1/jobs/{id}/cancel`; checkpoints survive and the run can be continued with
+`recon3d retry <job-id>`.
 
 **Resume after a crash**
 Run the same command again. Checkpoints live in
 `<project>/intermediate/<stage>/_checkpoint.json` and are reused when the inputs and
 parameters are unchanged. `--force` (CLI) or deleting a stage directory forces a re-run.
+
+To find out what a crashed process left behind:
+
+```bash
+recon3d jobs --json          # every recorded run, newest first; resumable ones are flagged
+recon3d retry <job-id>       # continue the failed/cancelled run from its checkpoints
+recon3d retry <job-id> --force-stage mesh_reconstruction   # rebuild a stage you distrust
+```
+
+A checkpoint is only trusted when the artefacts it promises still exist; if a mesh was
+deleted or a stage's inputs changed, that stage (and only that stage) is rebuilt.
+
+**Stopping a long run from another terminal or agent**
+`recon3d cancel <job-id>` (or `POST /v1/jobs/{id}/cancel`) writes a cancel request that the
+running job watches - it stops at the next stage boundary and keeps every finished stage.
+A stage that fails for a *transient* reason (busy disk, momentary allocation failure) is
+retried automatically (`--stage-retries`, default one extra attempt); bad input, sandbox
+refusals and cancellations are never retried.
 
 ## Image and coverage problems
 

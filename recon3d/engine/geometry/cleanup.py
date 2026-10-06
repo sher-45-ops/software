@@ -54,9 +54,33 @@ def count_components(mesh) -> int:
         return int(len(stripped.split(only_watertight=False)))
 
 
+def welded_copy(mesh):
+    """Copy of *mesh* with coincident vertices merged (UV seams undone).
+
+    Unwrapping duplicates vertices along every UV seam, which makes a single
+    watertight surface *look* like dozens of loose components.  Health numbers
+    must describe the surface, not the texture layout, so they are measured on a
+    welded copy - floaters and holes survive welding and are still reported.
+    """
+    try:
+        try:
+            # ``include_visual=False`` matters: a textured mesh deep-copies its PIL
+            # images, which is hundreds of megabytes at 4K/8K map sizes.
+            copy = mesh.copy(include_visual=False)
+        except TypeError:  # pragma: no cover - older trimesh without the keyword
+            copy = mesh.copy()
+            copy.visual = None
+        copy.merge_vertices()
+        return copy if len(copy.faces) else mesh
+    except Exception:  # pragma: no cover - measurement must never fail a run
+        return mesh
+
+
 def mesh_statistics(mesh) -> Dict[str, Any]:
     """A compact, agent-friendly health report for a mesh."""
     import trimesh
+
+    mesh = welded_copy(mesh)
 
     stats: Dict[str, Any] = {
         "vertices": int(len(mesh.vertices)),

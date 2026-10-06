@@ -94,6 +94,8 @@ def capability_report() -> Dict[str, Any]:
             "material_overrides": "{name: {...}} forced materials/colours",
             "perform_refinement": "bool (reference comparison + similarity refinement)",
             "stages": "optional subset of stage names",
+            "stage_retries": "int, extra attempts for a transient stage failure (default 1)",
+            "force_stages": "list of stage names to rebuild even if cached",
             "defaults": DEFAULT_PARAMS,
         },
         "outputs": OUTPUT_TREE,
@@ -101,8 +103,12 @@ def capability_report() -> Dict[str, Any]:
         "materials": sorted(MATERIAL_LIBRARY.keys()),
         "lod_ratios": DEFAULT_LOD_RATIOS,
         "interfaces": {
-            "cli": "recon3d <command> [--json]  (see docs/CLI.md)",
-            "rest": "POST /v1/projects/{id}/reconstruct, GET /v1/jobs/{id}, WS /v1/ws/jobs/{id}",
+            "cli": ("recon3d <command> [--json]: doctor setup create add-images projects project "
+                    "reconstruct status jobs cancel retry versions export serve studio models "
+                    "info  (see docs/CLI.md)"),
+            "rest": ("POST /v1/projects/{id}/reconstruct, GET /v1/jobs/{id}, "
+                     "POST /v1/jobs/{id}/cancel, GET /v1/jobs/{id}/artifacts/{path}, "
+                     "WS /v1/ws/jobs/{id}"),
             "mcp": "python -m recon3d.mcpserver (tools: recon3d_doctor, recon3d_create_project, "
                    "recon3d_reconstruct, recon3d_job_status, recon3d_list_outputs)",
         },
@@ -110,6 +116,10 @@ def capability_report() -> Dict[str, Any]:
         "offline_capable": True,
         "gpu_required": False,
         "backends": detect_backends(),
+        "recovery": ("Runs are checkpointed per stage and resumable: re-run the same command, "
+                     "or use `recon3d jobs` to find a failed/cancelled run and `recon3d retry "
+                     "<job-id>` to continue it. `recon3d cancel <job-id>` stops a job running "
+                     "in any process; finished stages are kept."),
         "honesty_policy": ("Every quality number in reports/ is measured from the produced files. "
                            "Unobserved texture regions are reported as missing rather than "
                            "invented, and a failed stage degrades instead of silently emitting a "

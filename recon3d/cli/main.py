@@ -14,6 +14,9 @@ Examples
     recon3d add-images hero ./refs/*
     recon3d reconstruct hero --preset high --target-polycount 60000
     recon3d status hero --watch
+    recon3d jobs
+    recon3d cancel job-1a2b3c4d5e6f
+    recon3d retry job-1a2b3c4d5e6f
     recon3d export hero --formats glb,fbx,usdz
     recon3d models list
     recon3d serve --port 8760
@@ -292,6 +295,8 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
                       (args.no_uvs, "generate_uvs"), (args.preview, "generate_previews")):
         if flag is not None:
             params[key] = bool(flag)
+    if args.stage_retries is not None:
+        params["stage_retries"] = max(0, int(args.stage_retries))
     if args.stages:
         params["stages"] = [s.strip() for s in args.stages.split(",") if s.strip()]
     if args.param:
@@ -403,6 +408,129 @@ def cmd_status(args: argparse.Namespace) -> int:
                      f"created {version.created_at}")
     _emit(payload, args, "\n".join(lines))
     return EXIT_OK
+
+
+def cmd_jobs(args: argparse.Namespace) -> int:
+    """List jobs, including runs started by an earlier process (server or CLI)."""
+    cfg = load_config()
+    cfg.ensure_dirs()
+    jobs = _job_manager(cfg)
+    live = {job.id: job for job in jobs.list(args.project)}
+    persisted = {item["id"]: item for item in jobs.persisted_jobs()}
+    records: List[Dict[str, Any]] = []
+    for job_id, job in live.items():
+        record = job.to_dict()
+        record["live"] = True
+        records.append(record)
+    for job_id, item in persisted.items():
+        if job_id in live:
+            continue
+        record = dict(item)
+        record["live"] = False
+        records.append(record)
+    if args.project:
+        records = [record for record in records if record.get("project") == args.project]
+    records.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+
+    lines = []
+    for record in records:
+        lines.append(
+            f"{record['id']}  {record.get('state', '?'):<9} "
+            f"{record.get('progress', 0):>5.1f}%  {record.get('project', '-'):<24} "
+            f"{record.get('stage', '')}  {record.get('message', '')}")
+        if record.get("resumable"):
+            lines.append(f"    resumable: rerun the same command to continue "
+                         f"(stage '{record.get('stage', '?')}')")
+        if (record.get("error") or {}).get("message"):
+            lines.append(f"    error: {record['error']['message']}")
+    _emit({"jobs": records, "count": len(records)}, args,
+          "\n".join(lines) if lines else "no jobs recorded yet")
+    return EXIT_OK
+
+
+def cmd_cancel(args: argparse.Namespace) -> int:
+    """Ask a running job to stop at the next checkpoint boundary."""
+    cfg = load_config()
+    cfg.ensure_dirs()
+    jobs = _job_manager(cfg)
+    try:
+        job = jobs.get(args.job)
+    except Recon3DError:
+        job = None
+    record = jobs.persisted(args.job)
+    finished = {"completed", "partial", "failed", "cancelled"}
+    known = job.state.value if job is not None else str((record or {}).get("state") or "")
+    if job is None and record is None:
+        print(f"no job '{args.job}' is running or recorded (see `recon3d jobs`)",
+              file=sys.stderr)
+        return EXIT_ERROR
+    if known in finished:
+        payload = {"ok": False, "job": args.job, "state": known,
+                   "message": f"job already finished ({known})"}
+        _emit(payload, args, f"job {args.job} already finished ({known}) - nothing to cancel")
+        return EXIT_ERROR
+    checkpoint_dir = None
+    if record and record.get("project"):  # noqa: SIM102
+        from ..core.project import ProjectManager
+
+        try:
+            project = ProjectManager(cfg.projects_path).resolve(str(record["project"]))
+            checkpoint_dir = project.intermediate_dir
+        except Recon3DError:
+            checkpoint_dir = None
+    path = jobs.request_cancel(args.job, reason=args.reason, checkpoint_dir=checkpoint_dir)
+    payload = {"ok": True, "job": args.job, "request": str(path),
+               "message": "cancellation requested; the job stops at the next safe point "
+                          "and keeps its checkpoints"}
+    _emit(payload, args, f"cancellation requested for {args.job}\n"
+                         f"  request file: {path}\n"
+                         f"  the job stops after the current stage and keeps every "
+                         f"finished stage, so a later run resumes from there")
+    return EXIT_OK
+
+
+def cmd_retry(args: argparse.Namespace) -> int:
+    """Re-run a failed or cancelled job, resuming from its checkpoints."""
+    cfg = load_config()
+    cfg.ensure_dirs()
+    jobs = _job_manager(cfg)
+    record = jobs.persisted(args.job)
+    if record is None:
+        print(f"no persisted job '{args.job}' (see `recon3d jobs`)", file=sys.stderr)
+        return EXIT_ERROR
+    if str(record.get("state")) in {"running", "queued", "cancelling"}:
+        print(f"job '{args.job}' is still {record['state']}; cancel it first",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    project_ref = record.get("project") or ""
+    from ..core.project import ProjectManager
+
+    manager = ProjectManager(cfg.projects_path)
+    project = manager.resolve(project_ref)
+    from ..core.pipeline import run_pipeline
+
+    params = dict(record.get("params") or {})
+    params.pop("stages", None)
+    if args.force_stage:
+        params["force_stages"] = [s.strip() for s in args.force_stage.split(",") if s.strip()]
+    stages = [s.strip() for s in args.stages.split(",") if s.strip()] if args.stages else None
+
+    job = jobs.create(project.id, kind="reconstruct", params=params, project_obj=project,
+                      resumed_from=args.job)
+    printer = _progress_printer(args)
+    unsubscribe = jobs.subscribe(lambda job_id, event: printer(event) if job_id == job.id else None)
+    try:
+        jobs.run_sync(job, lambda j: run_pipeline(project, j, params=params, stages=stages))
+    finally:
+        unsubscribe()
+    payload = {"ok": job.state.value in {"completed", "partial"},
+               "retried": args.job, "job": job.to_dict(), "result": job.result}
+    lines = [f"retry of {args.job} -> {job.id}: {job.state.value} ({job.progress:.0f}%)"]
+    if job.error:
+        lines.append(f"  error: {job.error.get('message')}")
+    _emit(payload, args, "\n".join(lines))
+    return EXIT_OK if payload["ok"] else EXIT_ERROR
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -592,6 +720,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--units", choices=["normalized", "meters", "centimeters", "millimeters"])
     p.add_argument("--subject-height", type=float, help="real-world height in metres (for metric export)")
     p.add_argument("--stages", help="comma separated subset of stages to run")
+    p.add_argument("--stage-retries", type=int,
+                   help="extra attempts for a stage that fails non-deterministically (default 1)")
     p.add_argument("--param", action="append", help="extra parameter, key=value (JSON value allowed)")
     p.add_argument("--rig", dest="rig", action="store_true", default=None)
     p.add_argument("--no-rig", dest="rig", action="store_false")
@@ -603,6 +733,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--watch", action="store_true", help="stream progress (default)")
     add_json(p)
     p.set_defaults(func=cmd_reconstruct)
+
+    p = sub.add_parser("jobs", help="list jobs (including runs from earlier processes)")
+    p.add_argument("--project", help="only jobs of this project")
+    add_json(p)
+    p.set_defaults(func=cmd_jobs)
+
+    p = sub.add_parser("cancel", help="ask a running job to stop and keep its checkpoints")
+    p.add_argument("job")
+    p.add_argument("--reason", default="cancelled by operator")
+    add_json(p)
+    p.set_defaults(func=cmd_cancel)
+
+    p = sub.add_parser("retry", help="re-run a failed/cancelled job, resuming from checkpoints")
+    p.add_argument("job")
+    p.add_argument("--stages", help="comma separated subset of stages to redo")
+    p.add_argument("--force-stage", help="comma separated stages to rebuild even if cached")
+    add_json(p)
+    p.set_defaults(func=cmd_retry)
 
     p = sub.add_parser("status", help="project/job status")
     p.add_argument("project")

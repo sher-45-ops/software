@@ -109,9 +109,18 @@ The full list with types and defaults is in `recon3d info --json → parameters`
 | `409 model_error` | optional model missing | run without it (fallback is automatic) or download explicitly |
 | HTTP `403 security_error` | sandbox/consent refusal | use the documented path semantics; never retry the same escape |
 
-**Cancellation and resume:** cancel with Ctrl+C (CLI), `POST /v1/jobs/{id}/cancel` (API) or
-by dropping the MCP call; then re-run the identical command to resume from the last
-checkpoint. Never delete a project to "start clean" unless the human asked for it.
+**Cancellation and resume:** cancel with Ctrl+C (CLI), `recon3d cancel <job-id>` (works
+across processes - it writes a request file the running job watches),
+`POST /v1/jobs/{id}/cancel` (API) or by dropping the MCP call; then re-run the identical
+command to resume from the last checkpoint. `recon3d jobs --json` lists every recorded run
+and flags the resumable ones; `recon3d retry <job-id>` continues a failed or cancelled run
+(same project, same parameters) straight from its surviving checkpoints. Never delete a
+project to "start clean" unless the human asked for it.
+
+**Retries are deliberate:** a stage that fails for a transient reason is retried
+automatically (`stage_retries`, default 1 extra attempt) and the attempts are visible in
+`job.stages[stage].attempts`. Input errors, sandbox refusals and cancellations are never
+retried - treat those as instructions to change the request, not to hammer the engine.
 
 ## Anti-patterns (do not do these)
 

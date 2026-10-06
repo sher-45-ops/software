@@ -108,19 +108,41 @@ class ProgressEvent:
 
 
 class CancellationToken:
-    """Cooperative cancellation shared between threads and the API."""
+    """Cooperative cancellation shared between threads, processes and the API.
 
-    def __init__(self) -> None:
+    Inside one process the token is an event.  A *watch file* extends it across
+    processes: ``recon3d cancel <job-id>`` touches ``<intermediate>/jobs/<id>.cancel``
+    and a running reconstruction - in the CLI or in the API server - stops at the
+    next checkpoint boundary and keeps everything it already finished.
+    """
+
+    def __init__(self, watch: Optional[Path] = None) -> None:
         self._event = threading.Event()
         self.reason: str = ""
+        self.watch: Optional[Path] = Path(watch) if watch else None
 
     def cancel(self, reason: str = "cancelled by operator") -> None:
         self.reason = reason
         self._event.set()
 
+    def watch_file(self, path: Path) -> None:
+        self.watch = Path(path)
+
+    def request_path(self) -> Optional[Path]:
+        return self.watch
+
     @property
     def cancelled(self) -> bool:
-        return self._event.is_set()
+        if self._event.is_set():
+            return True
+        if self.watch is not None:
+            try:
+                if self.watch.exists():
+                    self.reason = self.reason or "cancel requested by operator"
+                    return True
+            except OSError:  # pragma: no cover - unreadable volume
+                return False
+        return False
 
     def raise_if_cancelled(self) -> None:
         if self.cancelled:

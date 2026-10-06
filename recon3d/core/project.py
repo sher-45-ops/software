@@ -373,7 +373,8 @@ class Project:
                 filename = unique_name(src.name, used_names)
                 used_names.add(filename)
                 dest = self.originals_dir / filename
-                shutil.copy2(src, dest)
+                if not _same_file(src, dest):
+                    shutil.copy2(src, dest)
                 hint = (views[index] if views and index < len(views) else None) or "unknown"
                 image = ReferenceImage(
                     id=f"img{len(self.images) + len(added) + 1:04d}",
@@ -659,6 +660,25 @@ def hash_inputs(items: Sequence[Any]) -> str:
         h.update(json.dumps(item, sort_keys=True, default=str).encode("utf-8"))
         h.update(b"\x00")
     return h.hexdigest()[:32]
+
+
+def _same_file(source: Path, destination: Path) -> bool:
+    """True when the source already *is* the destination file.
+
+    Re-adding an image that already lives in ``input/original`` (or an upload
+    staged inside the project) must be a no-op rather than a crash:
+    ``shutil.copy2`` raises ``SameFileError`` when source and destination are the
+    same path.
+    """
+    try:
+        if source.resolve() == destination.resolve():
+            return True
+    except OSError:  # pragma: no cover - unresolvable paths fall through
+        return False
+    try:
+        return destination.exists() and source.samefile(destination)
+    except OSError:  # pragma: no cover
+        return False
 
 
 def unique_name(filename: str, used: Iterable[str]) -> str:

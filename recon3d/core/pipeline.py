@@ -20,6 +20,7 @@ from __future__ import annotations
 import gc
 import json
 import math
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,12 +54,30 @@ from ..engine.textures.project import (derive_pbr_maps, pack_orm, project_textur
 from ..engine.textures.uv import unwrap_mesh
 from ..engine.validation.assets import validate_version
 from ..engine.validation.quality import analyze_project_images
-from .jobs import Job, checkpoint_valid, read_checkpoint, write_checkpoint
+from .jobs import (Job, checkpoint_valid, invalidate_stage, read_checkpoint,
+                   write_checkpoint)
 from .project import AssetFiles, Project, Version, hash_inputs
 from .progress import ProgressReporter, STAGES, overall_progress
 from .store import merge_dicts, read_json, utc_now, write_json
 from .resources import mode_budget, profile_hardware, voxel_grid_budget
-from ..errors import CancelledError, InsufficientDataError, StageError
+from ..errors import (CancelledError, ConfigError, ConflictError, InsufficientDataError,
+                      NotFoundError, SecurityError, StageError, ValidationError)
+
+
+#: Errors that a retry cannot fix: they describe the *request* or the sandbox,
+#: not a transient hardware/IO condition.  Everything else is retried (bounded by
+#: ``stage_retries``), because a local pipeline can fail on a busy disk or a
+#: momentary allocation failure and the same call often succeeds straight away.
+NON_RETRYABLE_ERRORS = (CancelledError, ValidationError, SecurityError, ConfigError,
+                        NotFoundError, ConflictError, InsufficientDataError)
+
+
+def _may_retry(error: BaseException) -> bool:
+    """False for failures a retry cannot fix (bad input, sandbox, cancellation)."""
+    if isinstance(error, NON_RETRYABLE_ERRORS):
+        return False
+    cause = error.__cause__
+    return not isinstance(cause, NON_RETRYABLE_ERRORS)
 
 
 # --------------------------------------------------------------------------
@@ -91,6 +110,7 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "subject_height_m": 0.0,        # 0 -> from subject analysis
     "seed": 0,
     "backend": "auto",
+    "stage_retries": 1,             # extra attempts for a stage that fails non-deterministically
     "force_stages": [],             # stage names to re-run even if cached
     "skip_stages": [],              # stage names to skip entirely
     "label": "",
@@ -167,6 +187,10 @@ class StageSpec:
     requires: Tuple[str, ...] = ()
     optional: bool = False
     weight: float = 1.0
+    #: Stages whose outputs are named after the version (the final deliverables).
+    #: They are cheap to write and must describe *this* version, so a resumed run
+    #: regenerates them instead of copying the previous version's files.
+    always_run: bool = False
 
 
 @dataclass
@@ -182,6 +206,9 @@ class PipelineContext:
     warnings: List[str] = field(default_factory=list)
     cache: Dict[str, Any] = field(default_factory=dict)
     force: bool = False
+    #: Name of the stage currently executing - lets helpers such as
+    #: :func:`_persist_mesh` write into the right ``intermediate/<stage>/`` folder.
+    current_stage: str = ""
 
     # -- convenience accessors -----------------------------------------
     @property
@@ -522,6 +549,10 @@ def _stage_reconstruct(ctx: PipelineContext) -> Dict[str, Any]:
                                                             reporter=reporter)
                 ctx.cache["hull"] = hull
                 ctx.cache["mesh"] = mesh
+                # Record the final verdict on the hull too: the pre-depth carve ran
+                # the same check with no evidence available, and leaving that "skipped"
+                # note in place would misrepresent the decision in reports/stages.json.
+                hull.statistics["depth_fusion"] = fusion
                 depth_report["volume_fusion"] = fusion
                 depth_report["fused_into_volume"] = bool(fusion.get("validation", {}).get("accepted"))
                 reporter.update(90, "validated depth evidence against the silhouette hull")
@@ -559,6 +590,7 @@ def _stage_reconstruct(ctx: PipelineContext) -> Dict[str, Any]:
     stats = mesh_statistics(mesh)
     reporter.update(95, f"marching cubes produced {stats['faces']} faces")
     ctx.cache["mesh"] = mesh
+    _persist_mesh(ctx, mesh)
     ctx.version.assets.pointcloud = pointcloud_path
     report = {
         "hull": hull.statistics,
@@ -619,6 +651,7 @@ def _stage_silhouette_refine(ctx: PipelineContext) -> Dict[str, Any]:
             if after_iou >= baseline_iou + 1e-4:
                 ctx.cache["rig"] = candidate_rig
                 ctx.cache["mesh"] = candidate
+                _persist_mesh(ctx, candidate, "silhouette_refine")
                 ctx.cache["hull"] = hull
                 # The exported asset and the solved cameras must travel together:
                 # always persist the rig that belongs to the kept mesh, so agents
@@ -659,6 +692,7 @@ def _stage_cleanup(ctx: PipelineContext) -> Dict[str, Any]:
         reporter=ctx.reporter,
     )
     ctx.cache["mesh"] = mesh
+    _persist_mesh(ctx, mesh)
     ctx.cache["mesh_stats"] = mesh_statistics(mesh)
     for warning in report.warnings:
         ctx.reporter.warning(warning)
@@ -690,6 +724,7 @@ def _stage_topology(ctx: PipelineContext) -> Dict[str, Any]:
         report["decimation"] = decimate_report
     report["statistics"] = mesh_statistics(mesh)
     ctx.cache["mesh"] = mesh
+    _persist_mesh(ctx, mesh, "optimization")
     ctx.cache["mesh_stats"] = report["statistics"]
     ctx.report("optimization", report)
     ctx.reporter.update(100, f"topology: {report['statistics']['faces']} faces")
@@ -707,6 +742,10 @@ def _stage_uv(ctx: PipelineContext) -> Dict[str, Any]:
         ctx.reporter.warning(warning)
     ctx.cache["mesh"] = result.mesh
     ctx.cache["uvs"] = np.asarray(result.mesh.visual.uv)
+    # The unwrap duplicates vertices along UV seams.  Persist exactly that mesh: a
+    # resumed run has to export the same topology (and with its UVs) as the run
+    # that produced the checkpoint.
+    _persist_mesh(ctx, result.mesh, "uv")
     ctx.report("uv", result.to_dict())
     ctx.reporter.update(100, f"UV: {result.islands} islands, distortion "
                              f"{result.estimated_distortion:.3f}")
@@ -1057,7 +1096,7 @@ STAGE_TABLE: List[StageSpec] = [
     StageSpec("lod", _stage_lod, ("texture", "optimization"), optional=True),
     StageSpec("preview", _stage_preview, ("texture", "optimization"), optional=True),
     StageSpec("comparison", _stage_comparison, ("mesh_cleanup",), optional=True),
-    StageSpec("export", _stage_export, ("comparison",), optional=True),
+    StageSpec("export", _stage_export, ("comparison",), optional=True, always_run=True),
 ]
 
 #: Stage name -> public progress stage used in events (spec #30).
@@ -1122,25 +1161,24 @@ def _inputs_hash(ctx: PipelineContext, spec: StageSpec) -> str:
     images = []
     for img in project.data.get("images", []):
         images.append([img.get("id"), img.get("path"), img.get("sha256", ""), img.get("view")])
+    # Two things must *not* take part in this hash:
+    #   * the version id - checkpoints live in the project's
+    #     ``intermediate/<stage>/``, so one run must be able to resume another,
+    #     and every run generates a new version id;
+    #   * anything the pipeline derives from the images (analysed subject type,
+    #     solved scale hint, measured scores) - a stage would otherwise never
+    #     match its own checkpoint once a later stage wrote those values back.
+    # What identifies a stage's inputs is the *requested* parameters, the image
+    # set, and the input hashes of the stages it depends on.
+    requested = ctx.state.get("requested_params") or ctx.params
+    dependency_hashes = ctx.state.get("stage_input_hashes") or {}
     payload = {
         "stage": spec.name,
-        "params": {k: v for k, v in ctx.params.items() if not k.startswith("_")},
+        "params": {k: v for k, v in requested.items() if not k.startswith("_")},
         "images": images,
-        "version": ctx.version.id,
-        "dependency_reports": {name: _summarise(ctx.stage_reports.get(name))
-                               for name in spec.requires},
+        "dependencies": {name: dependency_hashes.get(name, "") for name in spec.requires},
     }
     return hash_inputs([payload])
-
-
-def _summarise(report: Any) -> Any:
-    if isinstance(report, dict):
-        return {k: _summarise(v) for k, v in sorted(report.items())
-                if not isinstance(v, (list, tuple, dict)) or k in
-                {"faces", "vertices", "occupied_voxels", "islands", "resolution"}}
-    if isinstance(report, (list, tuple)):
-        return len(report)
-    return report
 
 
 def run_pipeline(
@@ -1179,6 +1217,10 @@ def run_pipeline(
     ctx = PipelineContext(project=project, params=resolved, version=version, budget=budget,
                           reporter=reporter, profile=profile)
     ctx.force = bool(resolved.get("force_stages"))
+    # Snapshot the request before any stage runs: stages may write back what they
+    # derived (the analysed subject type, for instance), and a checkpoint that
+    # hashed those values could never be re-used by a later run.
+    ctx.state["requested_params"] = json.loads(json.dumps(resolved, default=str))
 
     specs = select_stages(stages, resolved.get("skip_stages"))
     force_stages = {str(s).lower() for s in (resolved.get("force_stages") or [])}
@@ -1201,43 +1243,93 @@ def run_pipeline(
             stage_dir = project.stage_dir(spec.name)
             stage_dir.mkdir(parents=True, exist_ok=True)
             inputs_hash = _inputs_hash(ctx, spec)
+            # Downstream stages chain on this value, so it must be known before
+            # the stage runs (and it is identical when the stage is resumed).
+            ctx.state.setdefault("stage_input_hashes", {})[spec.name] = inputs_hash
             cached = read_checkpoint(project, spec.name)
-            if (resume and spec.name not in force_stages
-                    and checkpoint_valid(project, spec.name, inputs_hash, require_outputs=False)):
+            # Validate the outputs whenever the checkpoint recorded any, so a
+            # stage whose artefacts were deleted is rebuilt instead of re-used.
+            outputs_expected = bool((cached or {}).get("outputs"))
+            if (resume and not spec.always_run and spec.name not in force_stages
+                    and checkpoint_valid(project, spec.name, inputs_hash,
+                                         require_outputs=outputs_expected)):
                 report = (cached or {}).get("statistics") or {}
+                checkpoint_data = cached or {}
                 stage_results[spec.name] = report
                 ctx.stage_reports[spec.name] = report
                 reporter.info(f"stage '{spec.name}' re-used cached results")
                 completed += spec.weight
                 job.progress = overall_progress(progress_name, 1.0)
-                _restore_cache_from_disk(ctx, spec, report)
-                continue
+                try:
+                    _restore_cache_from_disk(ctx, spec, checkpoint_data)
+                except StageError as exc:
+                    # The checkpoint is stale or damaged: rebuild this stage.
+                    reporter.warning(f"cached results for '{spec.name}' are unusable "
+                                     f"({exc.message}); rebuilding the stage")
+                    invalidate_stage(project, spec.name)
+                else:
+                    _materialise_version_outputs(ctx, checkpoint_data)
+                    continue
 
             reporter.update(1, f"running {spec.name}")
-            try:
-                report = spec.fn(ctx) or {}
-            except CancelledError:
-                raise
-            except Exception as exc:
-                stage_error = exc if isinstance(exc, StageError) else StageError(
-                    str(exc), stage=spec.name, recoverable=spec.optional)
+            ctx.current_stage = spec.name
+            version_before = _version_files(project, version)
+            attempts = max(1, int(resolved.get("stage_retries", 1) or 0) + 1)
+            stage_error: Optional[StageError] = None
+            last_exc: Optional[BaseException] = None
+            report: Any = {}
+            attempt = 1
+            for attempt in range(1, attempts + 1):
+                try:
+                    report = spec.fn(ctx) or {}
+                except CancelledError:
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    stage_error = exc if isinstance(exc, StageError) else StageError(
+                        str(exc), stage=spec.name, recoverable=spec.optional)
+                    if attempt < attempts and _may_retry(exc):
+                        delay = min(2.0, 0.5 * attempt)
+                        reporter.warning(
+                            f"stage '{spec.name}' failed on attempt {attempt}/{attempts} "
+                            f"({stage_error.message}); retrying in {delay:.1f}s")
+                        time.sleep(delay)
+                        continue
+                    break
+                else:
+                    stage_error = None
+                    break
+            if stage_error is not None:
+                stage_info = job.stages.setdefault(spec.name, {})
+                stage_info["status"] = "failed"
+                stage_info["attempts"] = attempt
                 stage_results[spec.name] = {"error": stage_error.message,
-                                            "code": stage_error.code}
-                job.stages.setdefault(spec.name, {})["status"] = "failed"
+                                            "code": stage_error.code,
+                                            "attempts": attempt}
                 failed.append(spec.name)
                 if not spec.optional:
                     write_checkpoint(project, spec.name, inputs_hash=inputs_hash,
-                                     status="failed", statistics={"error": stage_error.message})
-                    raise stage_error from exc
-                reporter.error(f"optional stage '{spec.name}' failed and was skipped: "
-                               f"{stage_error.message}")
+                                     status="failed",
+                                     statistics={"error": stage_error.message,
+                                                 "attempts": attempt})
+                    raise stage_error from last_exc
+                reporter.error(f"optional stage '{spec.name}' failed and was skipped after "
+                               f"{attempt} attempt(s): {stage_error.message}")
                 completed += spec.weight
                 continue
+            if attempt > 1:
+                reporter.info(f"stage '{spec.name}' recovered on attempt {attempt}")
+                job.stages.setdefault(spec.name, {})["attempts"] = attempt
 
             stage_results[spec.name] = report
             ctx.stage_reports[spec.name] = report
             job.stages.setdefault(spec.name, {})["status"] = "completed"
+            outputs = stage_artefacts(
+                project, spec.name,
+                produced=_version_files(project, version) - version_before)
+            outputs.update(_inputs_from_dependencies(project, spec))
             write_checkpoint(project, spec.name, inputs_hash=inputs_hash,
+                             outputs=outputs,
                              statistics=_json_safe(report))
             completed += spec.weight
             job.progress = overall_progress(progress_name, 1.0)
@@ -1245,6 +1337,7 @@ def run_pipeline(
                             stage=progress_name, overall=job.progress)
 
         # -- finalise -----------------------------------------------------
+        _refresh_version_assets(project, version)
         ctx.cache["mesh_stats"] = mesh_statistics(ctx.cache["mesh"]) if "mesh" in ctx.cache else {}
         comparison = ctx.cache.get("comparison") or {}
         quality = score_quality(
@@ -1309,23 +1402,372 @@ def run_pipeline(
         raise
 
 
-def _restore_cache_from_disk(ctx: PipelineContext, spec: StageSpec, report: Any) -> None:
-    """Reload the artefacts a cached stage produced into the in-memory cache."""
-    if spec.name == "camera_estimation":
+#: Stages whose geometry is persisted so a later run can resume from them.
+MESH_STAGE_FILES = ("mesh_reconstruction", "silhouette_refine", "mesh_cleanup",
+                    "optimization", "uv", "topology")
+
+
+def _inputs_from_dependencies(project: Any, spec: StageSpec) -> Dict[str, str]:
+    """Artefacts a stage needs from the stages it depends on.
+
+    They are recorded in its own checkpoint: a stage cannot be resumed without its
+    inputs (a materials stage cannot restore itself if the texture maps it read were
+    deleted), so a vanished *input* has to invalidate the dependent stage too.
+    """
+    needed: Dict[str, str] = {}
+    for dependency in spec.requires:
+        try:
+            checkpoint = read_checkpoint(project, dependency)
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if checkpoint:
+            needed.update(checkpoint.get("outputs") or {})
+    return needed
+
+
+def _version_files(project: Any, version: Any) -> set:
+    """Project-relative paths of every file currently in a version directory."""
+    if version is None:
+        return set()
+    try:
+        root = project.version_path(version.id)
+    except Exception:  # pragma: no cover - defensive
+        return set()
+    if not root.exists():
+        return set()
+    return {str(path.relative_to(project.root)) for path in root.rglob("*") if path.is_file()}
+
+
+def stage_artefacts(project: Any, stage: str, *, produced: Optional[set] = None) -> Dict[str, str]:
+    """Files a stage produced, relative to the project root.
+
+    Recorded in the stage's checkpoint so :func:`checkpoint_valid` can detect a
+    stage whose outputs were deleted or truncated (spec: corrupted-stage
+    detection) instead of silently re-using a broken checkpoint.
+    """
+    directory = project.stage_dir(stage, create=False)
+    if not directory.exists():
+        return {}
+    found: Dict[str, str] = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_file() and path.name != "_checkpoint.json":
+            relative = str(path.relative_to(project.root))
+            found[relative] = relative
+    # Version outputs (textures, rig, LODs, previews, final files) are recorded too:
+    # a follow-up run resumes a stage by reading the *previous* version's files, and
+    # a checkpoint must not claim outputs that were deleted in the meantime.
+    for relative in sorted(produced or ()):
+        found[relative] = relative
+    return found
+
+
+def _persist_mesh(ctx: PipelineContext, mesh: Any, name: Optional[str] = None) -> Optional[str]:
+    """Write a stage's mesh next to its checkpoint so it can be resumed."""
+    if mesh is None or len(getattr(mesh, "faces", [])) == 0:
+        return None
+    stage = name or ctx.current_stage
+    if stage not in MESH_STAGE_FILES:
+        return None
+    target = ctx.project.stage_dir(stage) / "mesh.ply"
+    try:
+        with target.open("wb") as handle:
+            mesh.export(handle, file_type="ply")
+    except Exception as exc:  # pragma: no cover - persistence must never break a run
+        ctx.reporter.warning(f"could not persist the mesh for stage '{stage}': {exc}")
+        return None
+    return str(target.relative_to(ctx.project.root))
+
+
+def _mesh_stage_order() -> List[str]:
+    """Geometry stages in pipeline order (used to pick the mesh to reload)."""
+    return [spec.name for spec in STAGE_TABLE if spec.name in MESH_STAGE_FILES]
+
+
+def _load_stage_mesh(ctx: PipelineContext) -> Any:
+    """Persisted mesh for the stage being resumed (crash recovery).
+
+    The stage's own surface is preferred; when it is missing (or the stage never
+    persisted one) the closest earlier geometry stage is used, then the newest one.
+    """
+    order = _mesh_stage_order()
+    current = getattr(ctx, "current_stage", "")
+    if current in order:
+        index = order.index(current)
+        candidates = ([current] + list(reversed(order[:index]))
+                      + list(reversed(order[index + 1:])))
+    else:
+        candidates = list(reversed(order))
+    for stage in candidates:
+        candidate = ctx.project.stage_dir(stage, create=False) / "mesh.ply"
+        if candidate.exists():
+            try:
+                import trimesh
+
+                mesh = trimesh.load(str(candidate), force="mesh", process=False)
+                if mesh is not None and len(getattr(mesh, "faces", [])) > 0:
+                    ctx.reporter.info(f"resumed geometry from '{stage}/mesh.ply' "
+                                      f"({len(mesh.faces)} faces)")
+                    return mesh
+            except Exception as exc:  # pragma: no cover - fall through to the next stage
+                ctx.reporter.warning(f"could not reload '{candidate.name}': {exc}")
+    return None
+
+
+def _recorded_version_dir(ctx: PipelineContext, checkpoint: Dict[str, Any],
+                          kind: str, filename: str) -> Optional[Path]:
+    """Directory of ``kind`` (textures/ rig/ materials/) recorded by a checkpoint.
+
+    A resumed run creates a *new* version, so the artefacts to reload live in the
+    version that produced the checkpoint - its paths are recorded in ``outputs``
+    (the intermediates of the same stage are recorded next to them, so the lookup
+    insists on the directory that really holds the wanted file).
+    """
+    root = Path(ctx.project.root)
+    candidates: List[Path] = []
+    for relative in (checkpoint.get("outputs") or {}):
+        path = root / relative
+        if path.exists() and path.parent.name == kind and path.name == filename:
+            candidates.append(path.parent)
+    # Fall back to the run's own version (a stage that produced its outputs twice,
+    # or a checkpoint written before this bookkeeping existed).
+    local = Path(ctx.version_dir) / kind
+    if (local / filename).exists():
+        candidates.append(local)
+    for candidate in candidates:
+        if (candidate / filename).exists():
+            return candidate
+    return None
+
+
+def _restore_cache_from_disk(ctx: PipelineContext, spec: StageSpec,
+                             checkpoint: Dict[str, Any]) -> None:
+    """Reload the artefacts a cached stage produced into the in-memory cache.
+
+    Re-using a checkpoint is only honest when the stage's outputs are actually
+    back in the cache - otherwise the next stage would fail (or, worse, work on a
+    stale object).  Anything that cannot be restored invalidates the checkpoint.
+    """
+    name = spec.name
+    if name in {"camera_estimation", "silhouette_refine", "mesh_reconstruction"}:
         try:
             ctx.cache["rig"] = load_rig(ctx.project)
-        except Exception:  # pragma: no cover
-            pass
-    elif spec.name in {"optimization", "mesh_cleanup"}:
-        # A cached cleanup means we must reload the mesh from the previous stage.
-        pass
-    elif spec.name in {"uv", "texture", "materials"} and "mesh" in ctx.cache:
-        uvs_path = ctx.project.stage_dir("uv") / "uv.npz"
+        except Exception as exc:  # pragma: no cover
+            raise StageError(f"cached cameras could not be reloaded: {exc}", stage=name,
+                             details={"hint": "delete intermediate/camera_estimation and retry"})
+    if name in MESH_STAGE_FILES:
+        mesh = _load_stage_mesh(ctx)
+        if mesh is None:
+            raise StageError(
+                "the cached geometry for this stage is missing, so the run cannot resume "
+                "from it", stage=name,
+                details={"hint": "delete the stage's intermediate directory to force a rebuild"})
+        ctx.cache["mesh"] = mesh
+    if name == "validation":
+        # The image-quality report feeds the final quality score: without it a routed
+        # run would *report* a worse asset than the one it actually produced.
+        stats = checkpoint.get("statistics") or {}
+        if stats:
+            ctx.cache["image_report"] = stats
+    if name == "comparison":
+        stats = checkpoint.get("statistics") or {}
+        comparison = stats.get("comparison")
+        if not isinstance(comparison, dict) or not comparison:
+            raise StageError("the cached reference comparison is missing, so the run "
+                             "cannot report honest quality numbers for the resumed model",
+                             stage=name)
+        ctx.cache["comparison"] = comparison
+        ctx.cache["refinement"] = stats.get("refinement") or {}
+    if name in {"uv", "texture", "materials"}:
+        uvs_path = ctx.project.stage_dir("uv", create=False) / "uv.npz"
         if uvs_path.exists():
             try:
                 ctx.cache["uvs"] = np.load(uvs_path)["uvs"]
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as exc:  # pragma: no cover
+                raise StageError(f"cached UVs could not be reloaded: {exc}", stage=name)
+    if name in {"texture", "materials"}:
+        loaded = _restore_texture(ctx, checkpoint)
+        if loaded is None:
+            raise StageError("the cached texture maps are missing, so the run cannot resume",
+                             stage=name)
+        if name == "materials":
+            if not _restore_material_assignment(ctx, checkpoint):
+                raise StageError("the cached material assignment is missing, so the run "
+                                 "cannot resume", stage=name)
+    if name == "rigging":
+        if not _restore_rig_data(ctx, checkpoint):
+            raise StageError("the cached rig data is missing, so the run cannot resume",
+                             stage=name)
+    _attach_uvs(ctx)
+
+
+def _materialise_version_outputs(ctx: PipelineContext, checkpoint: Dict[str, Any]) -> List[str]:
+    """Copy a re-used stage's version files into this run's version directory.
+
+    A new version is a complete snapshot of the asset, so re-using a cached stage
+    must bring its outputs along (textures, rig, LODs, previews, final exports) -
+    otherwise a fully cached re-run would produce a version containing nothing but
+    reports, while still claiming every stage completed.
+    """
+    root = Path(ctx.project.root)
+    target_root = Path(ctx.version_dir)
+    copied: List[str] = []
+    for relative in (checkpoint.get("outputs") or {}):
+        parts = Path(relative).parts
+        if len(parts) < 3 or parts[0] != "versions":
+            continue
+        source = root / relative
+        if not source.is_file():
+            continue
+        destination = target_root.joinpath(*parts[2:])
+        if destination.exists() and destination.stat().st_size == source.stat().st_size:
+            continue
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        except OSError as exc:  # pragma: no cover - keep the run alive, report it
+            ctx.reporter.warning(f"could not copy '{relative}' into the new version: {exc}")
+            continue
+        copied.append(str(destination.relative_to(target_root)))
+    return copied
+
+
+#: version sub-directory -> the asset pointer it restores on a resumed run.
+_ASSET_DIRS = ("textures", "rig", "lod", "previews", "renders", "final", "reports",
+               "materials", "pointcloud")
+
+
+def _refresh_version_assets(project: Project, version: Version) -> None:
+    """Point a version's asset list at the files that are actually in its directory.
+
+    Stages write their own asset entries while they run; a version assembled from
+    re-used checkpoints (or a version whose files were copied over) has to have its
+    pointers rebuilt from disk, so ``version.json`` never advertises a missing file
+    and never hides a present one.
+    """
+    base = project.version_path(version.id)
+    if not base.is_dir():
+        return
+    assets = version.assets
+    files = [path for path in base.rglob("*") if path.is_file()]
+    known = set(assets.all_paths())
+
+    def add(target: List[str], path: Path) -> None:
+        relative = str(path.relative_to(base))
+        if relative not in target:
+            target.append(relative)
+
+    for path in sorted(files):
+        relative = str(path.relative_to(base))
+        if relative in known or relative == "version.json":
+            continue
+        top = path.relative_to(base).parts[0]
+        if top == "textures":
+            assets.textures.setdefault(path.stem, relative)
+        elif top == "rig":
+            assets.rig.setdefault(path.stem, relative)
+        elif top == "lod":
+            assets.lods.setdefault(path.stem, relative)
+        elif top == "previews":
+            add(assets.previews, path)
+        elif top == "renders":
+            add(assets.renders, path)
+        elif top == "final":
+            assets.mesh.setdefault(path.suffix.lstrip(".") or path.stem, relative)
+        elif top == "reports":
+            assets.reports.setdefault(path.stem, relative)
+        elif top == "materials" and path.name == "materials.json":
+            assets.materials = assets.materials or relative
+        elif top == "pointcloud":
+            assets.pointcloud = assets.pointcloud or relative
+
+
+def _attach_uvs(ctx: PipelineContext) -> None:
+    """Give a restored mesh its UVs back.
+
+    The exporters read texture coordinates from ``mesh.visual.uv``; a mesh loaded
+    from disk has none, so a resumed run would export a GLB without TEXCOORD_0
+    while still shipping texture maps - a silently wrong asset.
+    """
+    mesh = ctx.cache.get("mesh")
+    uvs = ctx.cache.get("uvs")
+    if mesh is None or uvs is None:
+        return
+    try:
+        import trimesh
+
+        uvs = np.asarray(uvs, dtype=np.float64)
+        if len(uvs) != len(mesh.vertices):
+            return
+        existing = getattr(getattr(mesh, "visual", None), "uv", None)
+        if existing is not None and len(np.asarray(existing)) == len(uvs):
+            return
+        mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
+    except Exception as exc:  # pragma: no cover - UV attachment is best effort
+        ctx.reporter.warning(f"could not re-attach UVs to the resumed mesh: {exc}")
+
+
+def _restore_texture(ctx: PipelineContext, checkpoint: Dict[str, Any]) -> Any:
+    """Rebuild the texture cache from the PNG maps a previous run wrote."""
+    from ..engine.textures.project import TextureResult
+
+    directory = _recorded_version_dir(ctx, checkpoint, "textures", "basecolor.png")
+    if directory is None:
+        return None
+    wanted = {"basecolor": "base_color", "normal": "normal", "roughness": "roughness",
+              "metallic": "metallic", "ao": "ao"}
+    arrays: Dict[str, np.ndarray] = {}
+    for filename, attribute in wanted.items():
+        path = directory / f"{filename}.png"
+        if not path.exists():
+            return None
+        from PIL import Image
+
+        arrays[attribute] = np.asarray(Image.open(path))
+    ctx.cache["texture"] = TextureResult(
+        base_color=arrays["base_color"], normal=arrays["normal"],
+        roughness=arrays["roughness"], metallic=arrays["metallic"], ao=arrays["ao"],
+        covered_mask=arrays["base_color"].sum(axis=2) > 1e-6,
+        statistics={"resumed": True},
+    )
+    ctx.reporter.info("resumed texture maps from the version's textures/ directory")
+    return ctx.cache["texture"]
+
+
+def _restore_material_assignment(ctx: PipelineContext, checkpoint: Dict[str, Any]) -> bool:
+    """Reload the material assignment a previous run wrote; False when it is gone."""
+    from ..engine.materials.library import MaterialAssignment, get_material
+
+    directory = _recorded_version_dir(ctx, checkpoint, "materials", "materials.json")
+    path = (directory / "materials.json") if directory is not None else None
+    data = read_json(path) if path is not None and path.exists() else None
+    if not isinstance(data, dict):
+        return False
+    entry = (data.get("assignment") or {}).get("material") or {}
+    name = entry.get("name") or data.get("library_entry") or "plastic"
+    material = get_material(name)
+    ctx.cache["material_assignment"] = MaterialAssignment(
+        material=material, confidence=float((data.get("assignment") or {}).get("confidence", 0.5)),
+        evidence={"reason": "resumed from materials.json"})
+    ctx.reporter.info(f"resumed material assignment '{material.name}'")
+    return True
+
+
+def _restore_rig_data(ctx: PipelineContext, checkpoint: Dict[str, Any]) -> bool:
+    """Reload skeleton + skin weights a previous run wrote; False when they are gone."""
+    directory = _recorded_version_dir(ctx, checkpoint, "rig", "rig.json")
+    if directory is None:
+        return False
+    rig_path = directory / "rig.json"
+    weights_path = directory / "skin_weights.npz"
+    if not rig_path.exists() or not weights_path.exists():
+        return False
+    data = read_json(rig_path) or {}
+    with np.load(weights_path, allow_pickle=True) as handle:
+        weights = handle["weights"]
+        joints = [str(j) for j in handle["joints"]]
+    ctx.cache["rig_data"] = {"weights": weights, "joints": joints, "rig": data}
+    ctx.reporter.info(f"resumed rig ({len(joints)} bones)")
+    return True
 
 
 def _json_safe(payload: Any) -> Any:
@@ -1354,7 +1796,9 @@ def _build_statistics(ctx: PipelineContext) -> Dict[str, Any]:
         "vertices": stats.get("vertices", 0),
         "triangles": stats.get("faces", 0),
         "faces": stats.get("faces", 0),
-        "mesh_health": stats.get("health_score"),
+        "mesh_health": (stats.get("health_score")
+                        if stats.get("health_score") is not None
+                        else mesh_health_score(stats)),
         "texture_resolution": texture.get("resolution"),
         "uv_islands": uv.get("islands"),
         "uv_distortion": uv.get("estimated_distortion"),

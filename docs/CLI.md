@@ -92,12 +92,20 @@ refuses (destructive operations are always explicit).
 | `--lods` / `--no-lods` | preset | build the LOD chain |
 | `--no-uvs` | — | skip UV/texture stages (geometry only) |
 | `--preview` / `--no-preview` | on | previews and reference-comparison renders |
+| `--stage-retries N` | `1` | extra attempts for a stage that fails for a transient reason (bad input is never retried) |
 | `--watch` | on | stream stage/progress lines to stdout |
 | `--json` | — | one JSON object on stdout: `status`, `quality`, `statistics`, `outputs`, `stages_failed`, `validation`, `job` (events on stderr as JSON lines) |
 
-Runs are checkpointed per stage. Re-running the identical command resumes where the last
+Runs are checkpointed per stage - and a checkpoint is re-used whenever the requested
+parameters, the images and the upstream stages are unchanged. Re-running the identical
+command on a finished project is therefore a *snapshot*: every stage reports `re-used cached
+results`, the version directory is filled with the same files, the measured quality is
+identical, and it takes seconds instead of minutes (the final export is rewritten because
+its files are named after the version). Re-running a stopped command resumes where the last
 attempt stopped; changing an input or parameter invalidates only the affected stages.
-`Ctrl+C` cancels cleanly and keeps the checkpoints.
+`Ctrl+C` cancels cleanly and keeps the checkpoints. A stage that fails for a transient
+reason (busy disk, momentary allocation failure) is retried up to `--stage-retries` times;
+input errors, sandbox rejections and cancellations are never retried.
 
 ```bash
 # Geometry only, fast
@@ -112,6 +120,42 @@ recon3d reconstruct hero --preset game_ready --target-polycount 25000 \
 
 Job state, progress, per-stage timings and the measured quality of the last finished
 version. `--watch` follows a running job.
+
+### `recon3d jobs [--project PROJECT] [--json]`
+
+Lists every job this machine has recorded - including runs started by an earlier process,
+by the REST API or by an agent - newest first. Each record shows the state, progress,
+stage, errors and whether the job is **resumable** (finish it by re-running the same
+command, or with `recon3d retry`).
+
+```bash
+recon3d jobs --json | jq '.jobs[] | select(.resumable) | .id'
+```
+
+### `recon3d cancel JOB [--reason TEXT] [--json]`
+
+Asks a running job to stop at the next checkpoint boundary. The request is a file written
+next to the job's state, so it works across processes: an agent or a second terminal can
+stop a reconstruction running inside the API server.
+
+```bash
+recon3d cancel job-1a2b3c4d5e6f --reason "switching to the high preset"
+```
+
+Everything finished before the stop is kept, so `recon3d retry` (or re-running the same
+`reconstruct` command) continues from there instead of starting over. Cancelling a job
+that already finished is refused.
+
+### `recon3d retry JOB [--stages LIST] [--force-stage LIST] [--json]`
+
+Re-runs a failed or cancelled job from its persisted record - same project, same
+parameters - resuming from the checkpoints that survived. Use `--force-stage` to rebuild
+a stage you don't trust (for example after changing something outside the project).
+
+```bash
+recon3d jobs                       # find the id of the run that died
+recon3d retry job-1a2b3c4d5e6f     # continue; finished stages are re-used
+```
 
 ## Outputs, servers, models
 

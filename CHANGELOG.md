@@ -7,6 +7,58 @@ All notable changes to Recon3D Engine. This project follows
 
 First release: a complete, local-first multi-view image-to-3D reconstruction engine.
 
+> This release was re-cut on 2026-10-06 after a hardening pass (same version, because the
+> first upload was never announced). The tag, the wheel/sdist and the attached gate report
+> all point at the hardened commit.
+
+### Fixed (hardening pass)
+
+- **Checkpoints are now genuinely resumable.** The input hash no longer mixes in anything
+  the pipeline itself derives during a run (analysed subject type, solved scale hint,
+  measured scores) - it hashes the *requested* parameters, the image set and the input
+  hashes of the stage's dependencies. A crashed or cancelled run now really continues
+  instead of redoing every stage.
+- **A stage whose artefacts vanished is rebuilt**, not silently re-used:
+  `checkpoint_valid(..., require_outputs=...)` verifies the files each checkpoint promises,
+  and unusable cache entries are invalidated and re-executed.
+- **Every geometry stage persists its surface** (`intermediate/<stage>/mesh.ply`), so
+  `mesh_reconstruction` (the expensive carve) can be resumed directly.
+- `Project.add_images` no longer crashes with `SameFileError` when a reference already
+  lives inside `input/original` - exactly what the REST upload path does.
+- `GET /health` returned 500 because `JobManager.active_count` was serialised as a bound
+  method; it is a property again.
+- WebSocket progress (`/v1/ws/jobs/{id}`) failed with HTTP 403: FastAPI could not resolve
+  annotations that were only imported inside functions. Every name in an annotation is now
+  importable at module scope.
+
+### Added (hardening pass)
+
+- **Cancellation across processes**: `recon3d cancel JOB` writes a request file that a
+  running job watches, so a second terminal or an agent can stop a reconstruction running
+  under the API server - finished stages stay checkpointed.
+- **Bounded retries**: a stage that fails for a transient reason is retried
+  (`--stage-retries`, default 1 extra attempt); input errors, sandbox rejections and
+  cancellations are never retried. Attempt counts land in the job record and `stages.json`.
+- **Job recovery surface**: `recon3d jobs` lists every recorded run (including those from
+  earlier processes) and flags resumable ones; `recon3d retry JOB` re-runs a failed or
+  cancelled job from its persisted record, resuming from surviving checkpoints.
+- Job records are written both to the global log directory (a discoverable index) and to
+  the project's `intermediate/jobs/` (self-describing project folders).
+- **A re-used stage brings its outputs along**: textures, rig, LODs and comparison renders
+  are copied into the new version, and the version's asset pointers are rebuilt from disk,
+  so every version is a complete snapshot. A fully cached re-run now takes seconds, produces
+  the same files and the same measured quality as the original run, and the export stage is
+  regenerated because its files are named after the version.
+- **Resumed exports keep their UVs**: a mesh reloaded from disk gets its texture coordinates
+  re-attached, and the `uv` stage persists its seam-split mesh, so a resumed run no longer
+  emits a GLB without `TEXCOORD_0` while still shipping texture maps.
+- Mesh health (components, watertightness, Euler number) is measured on a welded copy of the
+  surface, so UV seam splitting is no longer reported as dozens of loose components.
+- New tests: checkpoint/resume (`tests/test_resume.py`), cross-process cancellation and
+  retry (`tests/test_robustness.py`), REST-only workflow incl. multipart upload, artefact
+  download and the model registry (`tests/test_rest_workflow.py`), WebSocket progress
+  (`tests/test_api_ws.py`).
+
 ### Added
 
 - **Pipeline (18 stages, checkpointed, resumable, cancellable)**: ingestion, validation,
