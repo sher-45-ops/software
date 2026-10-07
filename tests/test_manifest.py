@@ -166,3 +166,25 @@ def test_neural_backends_stay_optional():
                          cwd=str(ROOT))
     assert out.returncode == 0, out.stderr[-800:]
     assert out.stdout.strip() == "", f"the pipeline imported neural backends: {out.stdout!r}"
+
+
+def test_every_package_in_the_tree_is_packaged():
+    """A directory that works from the checkout but is absent from the wheel is a trap.
+
+    `recon3d/agent/` had no `__init__.py` and was not listed in pyproject, so
+    `pip install recon3d-*.whl` produced an engine whose `recon3d info` crashed with
+    ModuleNotFoundError while the source checkout worked. This guard walks the tree and
+    fails when any package directory is missing from the packaging list.
+    """
+    import tomllib
+
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    listed = set(project["tool"]["setuptools"]["packages"])
+    missing = []
+    for path in sorted((ROOT / "recon3d").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(ROOT).parts)
+        if package not in listed:
+            missing.append(package)
+        if not (path.parent / "__init__.py").exists():
+            missing.append(f"{package} (no __init__.py)")
+    assert not missing, f"these packages would be missing from the wheel: {sorted(set(missing))}"

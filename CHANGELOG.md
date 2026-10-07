@@ -43,6 +43,17 @@ already existed, all of them measured, all of them disclosed.
   instead of being quietly dropped. `recon3d info --json` exposes the budgets
   (`available_presets()[*].asset_budgets`).
 
+### Fixed
+
+- **The wheel was missing `recon3d.agent` (and `recon3d.engine.preview`).** Both were
+  implicit namespace directories: they worked from a source checkout, so every test, the CI
+  gate and the editable install passed, while `pip install recon3d-*.whl` produced an engine
+  whose `recon3d info` died with `ModuleNotFoundError`. They now have `__init__.py` files and
+  are listed in `pyproject.toml`, `tests/test_manifest.py` guards the package list against
+  the tree, and the release verification installs the *built wheel* and runs
+  `info`/`setup`/`doctor`/a real reconstruction through it. The `v1.0.0` wheels have the same
+  defect - use the 1.1.0 assets.
+
 ### Changed
 
 - `[all]` no longer installs `onnxruntime`; neural backends are opt-in

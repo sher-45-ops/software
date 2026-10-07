@@ -87,6 +87,7 @@ packages = [
   "recon3d.engine.optimization",
   "recon3d.engine.export",
   "recon3d.engine.analysis",
+  "recon3d.engine.preview",
   "recon3d.engine.compare",
   "recon3d.engine.backends",
   "recon3d.modelzoo",
@@ -94,6 +95,7 @@ packages = [
   "recon3d.cli",
   "recon3d.mcpserver",
   "recon3d.studio",
+  "recon3d.agent",
 ]
 include-package-data = true
 
