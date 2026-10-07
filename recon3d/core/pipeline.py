@@ -84,7 +84,7 @@ def _may_retry(error: BaseException) -> bool:
 # Parameters
 # --------------------------------------------------------------------------
 DEFAULT_PARAMS: Dict[str, Any] = {
-    "quality": "standard",          # draft | standard | high | ultra | game-ready | cinematic
+    "quality": "standard",          # fast | draft | standard | high | ultra | game-ready | cinematic
     "preset": "",                   # explicit preset name (overrides quality)
     "style": "realistic",
     "geometry": "auto",             # low | medium | high | auto
@@ -92,6 +92,9 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "target_polycount": "auto",
     "preserve_sharp_edges": True,
     "symmetry": "auto",             # auto | on | off | x | y | z
+    "symmetry_completion": True,    # mirror-complete the volume across the detected plane
+    "symmetry_min_score": 0.70,     # stage-4 symmetry needed before mirroring is attempted
+    "texture_inpainting": True,     # fill unobserved texels by diffusion (reported as inferred)
     "generate_uvs": True,
     "generate_pbr": True,
     "generate_rig": False,
@@ -120,6 +123,8 @@ DEFAULT_PARAMS: Dict[str, Any] = {
 
 #: Which preset corresponds to each user-facing ``quality`` value.
 QUALITY_TO_PRESET = {
+    "fast": "fast",
+    "quick": "fast",
     "draft": "draft",
     "performance": "draft",
     "standard": "standard",
@@ -145,8 +150,8 @@ def load_preset(name: str) -> Dict[str, Any]:
             return json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:  # pragma: no cover
             pass
-    performance_key = {"draft": "draft", "standard": "balanced", "high": "quality",
-                       "ultra": "maximum", "game_ready": "balanced",
+    performance_key = {"fast": "performance", "draft": "draft", "standard": "balanced",
+                       "high": "quality", "ultra": "maximum", "game_ready": "balanced",
                        "cinematic": "maximum"}.get(resolved, "balanced")
     return {"name": resolved, "performance_mode": performance_key,
             "params": {}, "_builtin": True}
@@ -512,6 +517,98 @@ def _canonical_frame(ctx: "PipelineContext", rig, mesh, hull, *, reporter):
     return rig, mesh, hull, framing
 
 
+def _apply_symmetry_completion(ctx: "PipelineContext", rig, hull, mesh, *, reporter):
+    """Complete + validate a mirror-completed volume (stage-4 symmetry evidence).
+
+    Returns ``(hull, mesh, report)``.  The proposal comes from
+    :func:`mirror_complete`; the decision comes from measuring the candidate
+    surface against the references, so a wrong mirror plane cannot silently
+    deform the asset.  Whatever is kept is recorded as an *inferred* region.
+    """
+    from ..engine.reconstruction.hull import mirror_complete
+
+    subject = ctx.cache.get("subject")
+    prior = float(getattr(subject, "bilateral_symmetry", 0.0) or 0.0)
+    setting = str(ctx.request("symmetry", "auto") or "auto").lower()
+    if not bool(ctx.request("symmetry_completion", True)):
+        return hull, mesh, {"skipped": True, "reason": "symmetry completion disabled for this run"}
+    if setting in {"off", "none", "false", "no", "0"}:
+        return hull, mesh, {"skipped": True, "reason": "symmetry handling disabled (symmetry=off)"}
+    if setting in {"x", "y", "z"}:
+        axis = setting
+    else:
+        axis = str(getattr(subject, "symmetry_plane", "x") or "x")
+    if setting in {"auto", "", "on", "true", "yes"} and prior < float(
+            ctx.request("symmetry_min_score", 0.70)):
+        return hull, mesh, {
+            "skipped": True, "axis": axis,
+            "reason": (f"stage-4 symmetry analysis measured {prior:.2f} bilateral symmetry "
+                       "(threshold 0.70); the subject is not symmetric enough to mirror safely"),
+        }
+    completed, info = mirror_complete(hull, axis=axis, reporter=reporter)
+    info["prior_symmetry"] = round(prior, 3)
+    if not info.get("applied"):
+        return hull, mesh, info
+
+    candidate = _extract_surface(ctx, completed, reporter=reporter)
+    base_iou = float(silhouette_iou_report(rig, mesh, ctx.masks()).get("mean_iou", 0.0))
+    candidate_iou = float(silhouette_iou_report(rig, candidate, ctx.masks()).get("mean_iou", 0.0))
+    confidence = round(min(0.95, 0.6 * prior + 0.4 * float(info.get("mirror_agreement", 0.0))), 3)
+    info["confidence"] = confidence
+    info["validation"] = {"base_iou": round(base_iou, 4), "completed_iou": round(candidate_iou, 4),
+                          "accepted": bool(candidate_iou >= base_iou + 1e-4)}
+    if candidate_iou < base_iou + 1e-4:
+        reporter.info(f"symmetry completion rejected: silhouette IoU {candidate_iou:.3f} < "
+                      f"{base_iou:.3f}; the mirror did not match the references better")
+        return hull, mesh, info
+
+    try:  # measured on the *completed* surface, same helper the analysis stage uses
+        info["measured_after"] = symmetry_report(candidate, axis=axis)
+    except Exception as exc:  # pragma: no cover - measurement is best effort
+        info["measured_after"] = {"error": str(exc)}
+    reporter.info(f"symmetry completion accepted: silhouette IoU {base_iou:.3f} -> "
+                  f"{candidate_iou:.3f}; {info['filled_voxels']} voxels marked inferred")
+    entries = _inferred_symmetry_entries(info, confidence)
+    ctx.cache.setdefault("inferred", []).extend(entries)
+    ctx.cache["symmetry_completion"] = info
+    info["inferred"] = [e["region"] for e in entries]
+    return completed, candidate, info
+
+
+def _inferred_symmetry_entries(info: Dict[str, Any], confidence: float) -> List[Dict[str, Any]]:
+    """One honesty record per filled region (spec: infer ⇒ disclose + confidence)."""
+    total = max(1, int(info.get("filled_voxels", 0) or 0))
+    evidence = (f"mirror agreement {info.get('mirror_agreement')} on the carved volume, "
+                f"stage-4 bilateral symmetry {info.get('prior_symmetry')}")
+    verified = ("silhouette IoU "
+                f"{info.get('validation', {}).get('base_iou')} -> "
+                f"{info.get('validation', {}).get('completed_iou')}")
+    entries: List[Dict[str, Any]] = []
+    for region in (info.get("regions") or []):
+        voxels = int(region.get("voxels", 0) or 0)
+        entries.append({
+            "kind": "symmetry_completion",
+            "stage": "mesh_reconstruction",
+            "axis": info.get("axis"),
+            "plane_world": info.get("plane_world"),
+            "region": region.get("region", "symmetry-completed volume"),
+            "voxels": voxels,
+            "share_of_filled": round(voxels / total, 4),
+            "confidence": confidence,
+            "evidence": evidence,
+            "verified": verified,
+        })
+    if not entries:
+        entries.append({
+            "kind": "symmetry_completion", "stage": "mesh_reconstruction",
+            "axis": info.get("axis"), "plane_world": info.get("plane_world"),
+            "region": f"symmetry-completed volume ({total} voxels)",
+            "voxels": total, "share_of_filled": 1.0, "confidence": confidence,
+            "evidence": evidence, "verified": verified,
+        })
+    return entries
+
+
 def _stage_reconstruct(ctx: PipelineContext) -> Dict[str, Any]:
     rig = ctx.cache["rig"]
     images = ctx.images()
@@ -560,6 +657,19 @@ def _stage_reconstruct(ctx: PipelineContext) -> Dict[str, Any]:
             depth_report = {"error": str(exc), "skipped": True}
             reporter.warning(f"depth estimation failed and was skipped: {exc}")
 
+    # -- symmetry completion ---------------------------------------------
+    # Stage 4 measured how symmetric the subject is; the carve can still leave
+    # one side thinner than the other (views disagree, a dark side is masked
+    # away, the lens solve tilts).  Mirror the volume about the measured plane,
+    # then keep the filled surface only if it matches the references better -
+    # exactly the contract depth fusion follows.  Anything kept is disclosed as
+    # an *inferred* region with a confidence in reports/quality.json.
+    hull, mesh, symmetry_report_data = _apply_symmetry_completion(
+        ctx, rig, hull, mesh, reporter=reporter)
+    if symmetry_report_data.get("applied"):
+        ctx.cache["hull"] = hull
+        ctx.cache["mesh"] = mesh
+
     # -- point cloud artefact -------------------------------------------
     pointcloud_path = ""
     if ctx.request("generate_pointcloud", True):
@@ -595,6 +705,7 @@ def _stage_reconstruct(ctx: PipelineContext) -> Dict[str, Any]:
     report = {
         "hull": hull.statistics,
         "depth": depth_report,
+        "symmetry": symmetry_report_data,
         "mesh": stats,
         "bounds": hull.bounds_min.tolist() + hull.bounds_max.tolist(),
         "pointcloud": pointcloud_path,
@@ -752,6 +863,38 @@ def _stage_uv(ctx: PipelineContext) -> Dict[str, Any]:
     return result.to_dict()
 
 
+def _record_texture_inpainting(ctx: PipelineContext, texture) -> None:
+    """List every atlas region the texture stage filled as *inferred*.
+
+    The fill itself happens inside the texture module (classic diffusion, no
+    neural model); this is the honesty half: each filled region, its size and
+    its confidence go to ``reports/quality.json`` and ``missing_regions`` so an
+    agent never mistakes a filled patch for an observed surface.
+    """
+    inpainting = (texture.statistics or {}).get("inpainting") or {}
+    if not inpainting.get("applied"):
+        return
+    observed = 1.0 - float(inpainting.get("inferred_ratio", 0.0))
+    verified = (f"{observed * 100:.1f}% of the atlas was observed by the references; "
+                f"{inpainting['inferred_texels']} texel(s) were not")
+    entries = []
+    for region in (inpainting.get("regions") or []):
+        entries.append({
+            "kind": "texture_inpainting",
+            "stage": "texture",
+            "region": region.get("region", "unobserved texture region"),
+            "texels": int(region.get("texels", 0) or 0),
+            "share_of_filled": region.get("share_of_filled"),
+            "uv_bbox": region.get("uv_bbox"),
+            "confidence": float(region.get("confidence", inpainting.get("confidence", 0.0))),
+            "evidence": inpainting.get("method", "diffusion fill"),
+            "verified": verified,
+        })
+    if entries:
+        ctx.cache.setdefault("inferred", []).extend(entries)
+        ctx.cache["texture_inpainting"] = inpainting
+
+
 def _texture_resolution(ctx: PipelineContext) -> int:
     requested = int(ctx.request("texture_resolution", 0) or 0)
     if requested <= 0:
@@ -776,9 +919,12 @@ def _stage_texture(ctx: PipelineContext) -> Dict[str, Any]:
     rig = ctx.cache["rig"]
     resolution = _texture_resolution(ctx)
     texture = project_texture(rig, mesh, uvs, ctx.image_arrays(), ctx.masks(),
-                              resolution=resolution, reporter=ctx.reporter)
+                              resolution=resolution,
+                              inpaint_unobserved=bool(ctx.request("texture_inpainting", True)),
+                              reporter=ctx.reporter)
     for warning in texture.warnings:
         ctx.reporter.warning(warning)
+    _record_texture_inpainting(ctx, texture)
 
     # Material estimation drives the metallic/roughness derivation.
     assignment = estimate_materials(
@@ -908,9 +1054,85 @@ def _stage_lod(ctx: PipelineContext) -> Dict[str, Any]:
         gc.collect()
     ctx.version.assets.lods = paths
     payload = chain.to_dict()
+    payload["budgets"] = _export_named_budgets(ctx, mesh, lod_dir, paths)
+    ctx.cache["budget_report"] = payload["budgets"]
     ctx.report("lod", payload)
     ctx.reporter.update(100, f"built {len(chain.levels)} LOD levels")
     return payload
+
+
+def _export_named_budgets(ctx: PipelineContext, mesh, lod_dir: Path,
+                          paths: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Ship one asset per named budget the preset declares (e.g. ``mobile``).
+
+    ``game_ready`` targets real-time engines, and real-time engines have very
+    different budgets on desktop and on phones.  The preset declares each budget
+    (polycount, texture size, LOD count); this builds and *measures* the variant,
+    then reports target-vs-actual per metric so a "mobile budget" is a verified
+    number rather than a claim.
+    """
+    from ..engine.geometry.simplify import simplify_mesh
+
+    preset = load_preset(str(ctx.params.get("_preset") or ctx.request("quality", "standard")))
+    budgets = preset.get("budgets") or {}
+    reports: List[Dict[str, Any]] = []
+    for name, budget in budgets.items():
+        if not isinstance(budget, dict):
+            continue
+        targets = {key: int(value) for key, value in budget.items()
+                   if isinstance(value, (int, float))}
+        try:
+            variant = mesh
+            target_faces = targets.get("target_polycount")
+            if target_faces and len(mesh.faces) > target_faces:
+                variant, _simplify_report = simplify_mesh(mesh, int(target_faces))
+            # A budget is a *cap*: never upsample to meet it.
+            base_resolution = _texture_resolution(ctx)
+            texture_resolution = min(int(targets.get("texture_resolution") or base_resolution),
+                                     base_resolution)
+            target_path = lod_dir / f"{name}.glb"
+            export_asset(variant, target_path, "glb",
+                         textures=_texture_payload(ctx, resolution=texture_resolution),
+                         material=_material_payload(ctx),
+                         rig=ctx.cache.get("rig_data"))
+            stats = mesh_statistics(variant)
+            actual = {"target_polycount": int(len(variant.faces)),
+                      "texture_resolution": texture_resolution,
+                      "lod_levels": len(paths)}
+            checks = {}
+            for metric, actual_value in actual.items():
+                target_value = targets.get(metric)
+                if target_value is None:
+                    continue
+                # triangles must fit *under* the budget; texture/lods are exact caps
+                checks[metric] = {"target": int(target_value), "actual": int(actual_value),
+                                  "pass": bool(actual_value <= target_value)}
+            report = {
+                "name": name,
+                "path": str(Path(target_path).relative_to(ctx.version_dir)),
+                "targets": targets,
+                "actual": actual,
+                "checks": checks,
+                "pass": all(c["pass"] for c in checks.values()) if checks else None,
+                "vertices": int(stats.get("vertices", 0)),
+                "mesh_health": stats.get("health_score"),
+                "description": budget.get("description") if isinstance(budget.get("description"), str) else None,
+            }
+            reports.append(report)
+            if report["pass"]:
+                ctx.reporter.info(f"budget '{name}' met: {actual['target_polycount']} triangles, "
+                                  f"texture {texture_resolution}px")
+            else:
+                ctx.reporter.warning(
+                    f"budget '{name}' not met: " +
+                    ", ".join(f"{m} {c['actual']} > {c['target']}" for m, c in checks.items()
+                              if not c["pass"]))
+            del variant
+            gc.collect()
+        except Exception as exc:  # pragma: no cover - a budget must never break a run
+            ctx.reporter.warning(f"budget '{name}' could not be built: {exc}")
+            reports.append({"name": name, "error": str(exc), "pass": False})
+    return reports
 
 
 def _texture_payload(ctx: PipelineContext, *, resolution: Optional[int] = None
@@ -1347,6 +1569,8 @@ def run_pipeline(
             texture_stats=(ctx.stage_reports.get("texture") or {}).get("texture"),
             image_report=ctx.cache.get("image_report"),
             camera_quality=(ctx.cache.get("rig").quality if ctx.cache.get("rig") is not None else {}),
+            inferred=ctx.cache.get("inferred"),
+            budgets=ctx.cache.get("budget_report"),
         )
         ctx.cache["quality"] = quality
         version.quality = quality
@@ -1856,7 +2080,7 @@ def available_presets() -> List[Dict[str, Any]]:
 
     profile = profile_hardware()
     presets: List[Dict[str, Any]] = []
-    for name in ("draft", "standard", "high", "ultra", "game_ready", "cinematic"):
+    for name in ("fast", "draft", "standard", "high", "ultra", "game_ready", "cinematic"):
         try:
             data = load_preset(name)
         except Exception:  # pragma: no cover - a missing preset must not break the CLI
@@ -1869,6 +2093,9 @@ def available_presets() -> List[Dict[str, Any]]:
             "params": data.get("params", {}),
             "policy": data.get("policy", {}),
             "budget": mode_budget(mode, profile),
+            # Named asset budgets the preset promises to ship (game_ready declares
+            # a measured mobile + desktop budget; the LOD stage exports each one).
+            "asset_budgets": data.get("budgets", {}),
         })
     return presets
 

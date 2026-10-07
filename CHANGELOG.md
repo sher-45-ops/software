@@ -3,6 +3,63 @@
 All notable changes to Recon3D Engine. This project follows
 [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-07
+
+Adds the three "finish the hard parts" features - all of them extensions of stages that
+already existed, all of them measured, all of them disclosed.
+
+### Added
+
+- **Symmetry completion** (`symmetry_completion`, `symmetry_min_score`). Stage 4 already
+  measures bilateral symmetry per reference and picks the mirror plane; the reconstruction
+  stage now *uses* that evidence: it locates the plane offset that best explains the carved
+  volume (Dice overlap of the volume with its own mirror), fills the voxels whose mirror
+  image is occupied but which the carve left empty, and keeps the completed surface **only
+  when it re-renders better against the references** than the carve it replaces. Refused or
+  degenerate mirrors are reported with the reason, never applied silently. `--symmetry x|y|z`
+  forces an axis, `--no-symmetry-completion` disables the fill, `--min-symmetry 0.65` tunes
+  the threshold.
+- **Texture inpainting** (`texture_inpainting`). The atlas texels no reference observed used
+  to ship as magenta. They are now filled by a classical multi-scale (pull-push) diffusion
+  fill - no neural network, no model weights, no external API - and each filled patch is
+  measured: bounding box in UV space, texel count and a `confidence` that decays with the
+  distance to the nearest texel a reference actually saw (a one-texel seam gap is trusted at
+  ~0.75, a whole occluded flank much less). `--no-inpainting` restores the magenta + warning
+  behaviour.
+- **Honest inference reporting.** `reports/quality.json` gains `inferred` (one entry per
+  filled region: kind, stage, region, size, confidence, evidence, verification) and
+  `inferred_summary`; the same regions are echoed into `missing_regions` as `inferred: …`, so
+  an agent that reads only that list cannot mistake a filled patch for an observed surface.
+  Inferred regions add a warning and never raise a score.
+- **A `fast` preset** (and a `fast` quality alias) for iteration: the existing `performance`
+  mode (160³ carve, 1K textures, one refinement pass, 6 comparison renders) instead of
+  `standard`'s 224-256³ carve. Measured on a 2-core / 4 GB CPU box with the same 9-view
+  fixture: **1 117 s (18.6 min) and 481 MB peak RSS at quality 93.3 / IoU 0.882**, versus
+  **2 097 s (35.0 min) and 688 MB at quality 93.7 / IoU 0.888** for `standard`.
+- **Measured asset budgets on `game_ready`.** The preset now declares a `mobile` budget
+  (12 000 triangles, 1 024 px texture, 4 LODs) alongside `desktop` (40 000 / 2 048 / 4); the
+  LOD stage exports each as `lod/<name>.glb` and reports target-vs-actual with a per-metric
+  pass/fail in `quality.json:budgets`. A budget that cannot be met is reported as failed
+  instead of being quietly dropped. `recon3d info --json` exposes the budgets
+  (`available_presets()[*].asset_budgets`).
+
+### Changed
+
+- `[all]` no longer installs `onnxruntime`; neural backends are opt-in
+  (`pip install recon3d[neural]`) and stay disabled unless a model is downloaded on purpose.
+- New CLI flags on `reconstruct`: `--symmetry`, `--min-symmetry`, `--no-symmetry-completion`,
+  `--no-inpainting`.
+- Version bumped to **1.1.0**. `v1.0.0` remains the original release: the first upload of it
+  was scored 85.2/100, the re-cut of the same tag scores 96.3/100 (see release notes); this
+  revision is published as `v1.1.0` so the two are never confused again.
+
+### Tests
+
+- 7 new tests: mirror completion on synthetic volumes (fills the missing lobe, is a no-op on
+  a symmetric volume, refuses to invent a second subject), the inpainting fill and its
+  per-region confidences, the disclosure path into `quality.json`/`missing_regions`, and the
+  budget export (pass and fail).
+
 ## [1.0.0] - 2026-10-05
 
 First release: a complete, local-first multi-view image-to-3D reconstruction engine.
@@ -136,4 +193,5 @@ First release: a complete, local-first multi-view image-to-3D reconstruction eng
   parseable JSON document; events now go to stderr and the reconstruct result is a flat
   envelope (`status`, `quality`, `statistics`, `outputs`, …).
 
+[1.1.0]: https://github.com/sher-45-ops/software/releases/tag/v1.1.0
 [1.0.0]: https://github.com/sher-45-ops/software/releases/tag/v1.0.0

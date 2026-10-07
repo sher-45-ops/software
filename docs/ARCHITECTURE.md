@@ -34,7 +34,7 @@ recon3d/
 │   ├── compare/           rasteriser, silhouette IoU, colour RMSE, quality scoring
 │   ├── export/            GLB/GLTF/OBJ/FBX/STL/PLY/USD/USDZ writers + verifiers
 │   └── backends/          optional-accelerator detection (COLMAP, Blender, Open3D…)
-├── presets/*.json         draft, standard, high, ultra, game_ready, cinematic
+├── presets/*.json         fast, draft, standard, high, ultra, game_ready, cinematic
 ├── modelzoo/              optional model registry + download manager
 ├── api/server.py          FastAPI REST + WebSocket + static studio UI
 ├── cli/main.py            14 subcommands, --json everywhere
@@ -147,12 +147,28 @@ splitting is not mistaken for loose components.
 - **Mesh cleanup**: floaters, isolated vertices, welds, hole filling, normal repair,
   degenerate/duplicate face removal and Laplacian smoothing (sharp-edge aware).
 
+## Symmetry completion
+
+Stage 4 (`analysis`) measures bilateral symmetry per reference image and picks the mirror
+plane (`symmetry_plane`).  The reconstruction stage consumes that evidence: it searches the
+plane offset that makes the carved volume most self-similar (Dice overlap of the volume with
+its own mirror - Dice rather than IoU so a degenerate "fold the subject into itself" plane
+cannot win), fills the voxels whose mirror image is occupied but which the carve left empty,
+re-extracts the surface, and accepts the result **only** if it matches the references better
+than the carve it replaces (silhouette IoU, same contract as depth fusion).  A fill that is
+too large to be a completion (> 35 % of the volume by default) is refused outright.  Accepted
+fills are listed as `inferred` regions with a confidence derived from the stage-4 symmetry
+score and the measured mirror agreement.
+
 ## Texturing and materials
 
 `uv` runs xatlas (MIT) when installed, else the built-in chart packer, and reports island
 count, packing efficiency, distortion, overlap and texel density. `texture` rasterises the
 atlas, renders visibility buffers per reference view, projects the reference colours, fills
-seams, and derives normal/roughness/metallic/AO from the projected result. `materials`
+seams, and derives normal/roughness/metallic/AO from the projected result.  Texels no
+reference observed are filled by a classical multi-scale pull-push diffusion (never a neural
+model); each filled patch is measured into a region with a distance-decayed `confidence` and
+reported under `inferred` in `reports/quality.json`. `materials`
 assigns a PBR profile from measured evidence (colour, saturation, gloss) and honours agent
 overrides such as `material_request="brushed aluminium"`.
 
@@ -162,7 +178,9 @@ overrides such as `material_request="brushed aluminium"`.
 smooth skin weights with distance falloff, checks the bind pose and runs a deformation
 stress test; output is `rig.json`, `skin_weights.npz`, `skin.json`. `lod` builds a chain
 (1.0, 0.5, 0.25, 0.125 of LOD0) with per-level budgets, measures surface error against
-LOD0 and (optionally) silhouette retention from the solved cameras. `preview` renders
+LOD0 and (optionally) silhouette retention from the solved cameras.  A preset may declare
+named asset budgets (`game_ready` ships `mobile` and `desktop`): each is exported to
+`lod/<name>.glb`, measured, and reported target-vs-actual with a per-metric pass/fail. `preview` renders
 turntables, stills and diagnostic maps; `comparison` re-renders the finished model from the
 reference angles and compares silhouettes/colours with the references.
 

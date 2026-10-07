@@ -37,9 +37,17 @@ every earlier checkpoint, so re-running the same command resumes instead of rest
 Known-recoverable stages (`preview`, `comparison`, `lod`, `rigging`, `texture` fallbacks)
 degrade with a warning instead of failing the job.
 
+**The run is slow (tens of minutes)**
+The `standard` preset carves at up to 224³ and takes ~35 min on a 2-core / 4 GB CPU box at
+9 references @ 384 px (2 097 s, 688 MB peak RSS, measured). In order of impact:
+1. `--preset fast` — the iteration preset: smaller carve (160³), 1K textures, one refinement
+   pass. Use it while you tune the reference set, then re-run `standard` for the final asset.
+2. `--preset draft` for a quick sanity check, `--texture-resolution 1024` to cap texturing.
+3. Run the heavy stages separately with `--stages`.
+
 **Out of memory (process killed, or `MemoryError`)**
 Reconstruction is memory-hungry at high carve resolutions. In order of impact:
-1. `--preset draft` (or `recon3d setup --performance-mode draft`).
+1. `--preset fast` or `--preset draft` (or `recon3d setup --performance-mode draft`).
 2. Lower texture size: `--texture-resolution 1024`.
 3. Fewer/smaller images: the engine caps working resolution itself (`RECON3D_LIMIT_MAX_IMAGE_DIM`).
 4. `--stages` to run the heavy parts separately.

@@ -49,7 +49,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}"
+          # On a tag push the tag names the release.  On a branch push the release
+          # follows the package version (never a hard-coded tag: that once uploaded
+          # one version's assets onto another version's release).
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -z "$TAG" ]; then
+            TAG="v$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
             gh release view "$TAG" --json assets --jq '[.assets[].name]'
@@ -100,7 +106,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}"
+          TAG="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -z "$TAG" ]; then
+            TAG="v$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          fi
           test -f .e2e/e2e-standard.json || {
             echo "::error::the gate produced no report"; tail -40 gate.log || true; exit 1; }
           python -c "import json;d=json.load(open('.e2e/e2e-standard.json'));print('gate report:', json.dumps({k:d.get(k) for k in ('preset','duration_s','quality','metrics','ok','result')})[:2000])"

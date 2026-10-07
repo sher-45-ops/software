@@ -297,6 +297,14 @@ def cmd_reconstruct(args: argparse.Namespace) -> int:
             params[key] = bool(flag)
     if args.stage_retries is not None:
         params["stage_retries"] = max(0, int(args.stage_retries))
+    if args.symmetry:
+        params["symmetry"] = args.symmetry
+    if args.min_symmetry is not None:
+        params["symmetry_min_score"] = float(args.min_symmetry)
+    if args.inpainting is not None:
+        params["texture_inpainting"] = bool(args.inpainting)
+    if args.symmetry_completion is not None:
+        params["symmetry_completion"] = bool(args.symmetry_completion)
     if args.stages:
         params["stages"] = [s.strip() for s in args.stages.split(",") if s.strip()]
     if args.param:
@@ -712,8 +720,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("reconstruct", help="run the reconstruction pipeline")
     p.add_argument("project")
     p.add_argument("--preset", default="standard",
-                   choices=["draft", "standard", "high", "ultra", "game_ready", "cinematic"])
-    p.add_argument("--quality", choices=["draft", "standard", "high", "ultra", "game_ready", "cinematic"])
+                   choices=["fast", "draft", "standard", "high", "ultra", "game_ready",
+                            "cinematic"])
+    p.add_argument("--quality", choices=["fast", "draft", "standard", "high", "ultra",
+                                         "game_ready", "cinematic"])
     p.add_argument("--target-polycount", type=int)
     p.add_argument("--texture-resolution", type=int)
     p.add_argument("--formats", help="comma separated export formats (glb,obj,fbx,stl,ply,usdz)")
@@ -723,6 +733,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stage-retries", type=int,
                    help="extra attempts for a stage that fails non-deterministically (default 1)")
     p.add_argument("--param", action="append", help="extra parameter, key=value (JSON value allowed)")
+    p.add_argument("--symmetry", choices=["auto", "on", "off", "none", "x", "y", "z"],
+                   help="mirror-plane handling: auto (stage-4 score decides), on/off, or a forced axis")
+    p.add_argument("--min-symmetry", type=float, dest="min_symmetry",
+                   help="stage-4 bilateral symmetry required before mirror completion (default 0.70)")
+    p.add_argument("--no-inpainting", dest="inpainting", action="store_false", default=None,
+                   help="leave unobserved texture texels magenta instead of filling them by diffusion")
+    p.add_argument("--no-symmetry-completion", dest="symmetry_completion", action="store_false",
+                   default=None, help="detect the mirror plane but never mirror-complete the volume")
     p.add_argument("--rig", dest="rig", action="store_true", default=None)
     p.add_argument("--no-rig", dest="rig", action="store_false")
     p.add_argument("--lods", dest="lods", action="store_true", default=None)

@@ -189,8 +189,18 @@ def score_quality(
     texture_stats: Optional[Dict[str, Any]] = None,
     image_report: Optional[Dict[str, Any]] = None,
     camera_quality: Optional[Dict[str, Any]] = None,
+    inferred: Optional[Sequence[Dict[str, Any]]] = None,
+    budgets: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Build the agent-facing quality block (spec #48)."""
+    """Build the agent-facing quality block (spec #48).
+
+    ``inferred`` is the honesty channel: every surface or texture region the
+    engine *filled in* (symmetry completion, texture diffusion) rather than
+    observed is listed here with its confidence **and** echoed into
+    ``missing_regions``, so a caller that only reads that list still sees it.
+    ``budgets`` carries the measured target-vs-actual result of the preset's
+    named asset budgets (e.g. ``game_ready``'s mobile budget).
+    """
     mean_iou = float(comparison.get("mean_iou", 0.0))
     reference_similarity = float(np.clip(mean_iou * 100.0 * 1.05, 0.0, 100.0))
 
@@ -230,10 +240,31 @@ def score_quality(
         missing.append("bottom of object" if "bottom" in (image_report.get("missing_views") or [])
                        else "")
 
+    inferred_regions: List[Dict[str, Any]] = []
+    for entry in (inferred or []):
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        try:
+            item["confidence"] = round(float(item.get("confidence", 0.0)), 3)
+        except (TypeError, ValueError):
+            item["confidence"] = 0.0
+        item.setdefault("kind", "inferred")
+        inferred_regions.append(item)
+        missing.append(f"inferred: {item.get('region', 'unnamed region')} "
+                       f"(confidence {item['confidence']:.2f}, {item['kind']})")
+
     warnings: List[str] = []
     warnings.extend(comparison.get("warnings", []) or [])
     warnings.extend((image_report or {}).get("warnings", []) or [])
     warnings.extend(cam_quality.get("warnings", []) or [])
+    if inferred_regions:
+        kinds = sorted({str(e.get("kind")) for e in inferred_regions})
+        warnings.append(
+            f"{len(inferred_regions)} region(s) were *filled in* rather than observed "
+            f"({', '.join(kinds)}); each is listed with a confidence under 'inferred' "
+            "and cannot be verified from the supplied references"
+        )
     warnings = [w for w in dict.fromkeys(warnings) if w]
 
     overall = float(np.clip(0.45 * geometry_quality + 0.30 * reference_similarity +
@@ -241,6 +272,7 @@ def score_quality(
     grade = ("excellent" if overall >= 88 else "good" if overall >= 74 else
              "fair" if overall >= 58 else "poor")
 
+    budget_report = [dict(b) for b in (budgets or []) if isinstance(b, dict)]
     return {
         "overall": round(overall, 1),
         "grade": grade,
@@ -249,6 +281,14 @@ def score_quality(
         "mesh_health": round(float(health), 1),
         "texture_quality": round(texture_quality, 1),
         "missing_regions": sorted(set(m for m in missing if m)),
+        "inferred": inferred_regions,
+        "inferred_summary": {
+            "regions": len(inferred_regions),
+            "kinds": sorted({str(e.get("kind")) for e in inferred_regions}),
+            "mean_confidence": (round(float(np.mean([e["confidence"] for e in inferred_regions])), 3)
+                                if inferred_regions else None),
+        },
+        "budgets": budget_report,
         "warnings": warnings,
         "metrics": {
             "mean_silhouette_iou": comparison.get("mean_iou"),

@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "recon3d",
   "display_name": "Recon3D Engine",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "summary": "Local-first multi-view image to 3D reconstruction engine. Turns front/back/left/right/three-quarter/top reference images of a subject into a real textured mesh (with UVs, PBR maps, LODs and an optional rig). Runs entirely on the local CPU; no external generative AI service is used.",
   "license": "Apache-2.0",
   "repository": {
@@ -161,7 +161,7 @@
       },
       {
         "name": "texture",
-        "description": "multi-view texture projection, PBR map derivation, ORM packing"
+        "description": "multi-view texture projection, diffusion inpainting of unobserved texels (reported as inferred), PBR map derivation, ORM packing"
       },
       {
         "name": "materials",
@@ -189,11 +189,12 @@
       }
     ],
     "presets": {
+      "fast": "iteration preset: smaller carve + 1K textures, ~2-3x faster than standard",
       "draft": "fastest, lowest detail (preview / iteration)",
       "standard": "balanced default for everyday assets",
       "high": "high quality, larger textures, camera refinement",
       "ultra": "maximum quality, every stage at full effort",
-      "game_ready": "strict polycount + full LOD chain for real-time engines",
+      "game_ready": "strict polycount + full LOD chain for real-time engines, with a measured mobile budget exported alongside the desktop one",
       "cinematic": "maximum detail for offline rendering, no polycount limit"
     },
     "parameters": {
@@ -205,6 +206,9 @@
       "target_polycount": "int or 'auto' - triangle budget for the exported mesh",
       "preserve_sharp_edges": "bool - keep mechanical/hard edges instead of smoothing them away",
       "symmetry": "auto|none|on|x|y|z - enforce a mirror plane when the subject has one",
+      "symmetry_completion": "bool - mirror-complete the carved volume across the detected plane; filled regions are reported as inferred with a confidence",
+      "symmetry_min_score": "0..1 - stage-4 bilateral symmetry required before mirror completion is attempted at all (default 0.70)",
+      "texture_inpainting": "bool - fill unobserved atlas texels by classical diffusion; each filled region is listed as inferred with a confidence",
       "generate_uvs": "bool",
       "generate_pbr": "bool - derive normal/roughness/metallic/AO maps",
       "generate_rig": "bool - skeleton + skin weights (humanoid/creature)",
@@ -240,6 +244,9 @@
         "target_polycount": "auto",
         "preserve_sharp_edges": true,
         "symmetry": "auto",
+        "symmetry_completion": true,
+        "symmetry_min_score": 0.7,
+        "texture_inpainting": true,
         "generate_uvs": true,
         "generate_pbr": true,
         "generate_rig": false,
@@ -352,13 +359,13 @@
         },
         {
           "name": "onnxruntime",
-          "available": true,
-          "kind": "python",
-          "version": "1.30.0",
+          "available": false,
+          "kind": "none",
+          "version": "",
           "path": "",
           "license": "MIT",
           "purpose": "local neural models (depth/segmentation) from the model manager",
-          "notes": ""
+          "notes": "not installed (classical algorithms are used)"
         },
         {
           "name": "torch",
@@ -400,7 +407,7 @@
         "segmentation": "classical threshold/saliency+grabcut (always available)",
         "gpu": "CPU"
       },
-      "available_count": 3
+      "available_count": 2
     },
     "gpu_required": false,
     "offline_capable": true,
@@ -412,6 +419,22 @@
       "cancel": "recon3d cancel JOB  (works across processes; finished stages are kept)",
       "retry": "recon3d retry JOB [--stages ...] [--force-stage ...]  (resumes from checkpoints)",
       "retries": "stage_retries (default 1) retries transient stage failures; input errors are never retried"
+    },
+    "asset_budgets": {
+      "game_ready": {
+        "mobile": {
+          "description": "mobile / handheld GPU budget (glTF, single 1K material set)",
+          "target_polycount": 12000,
+          "texture_resolution": 1024,
+          "lod_levels": 4
+        },
+        "desktop": {
+          "description": "desktop / console real-time budget (LOD0)",
+          "target_polycount": 40000,
+          "texture_resolution": 2048,
+          "lod_levels": 4
+        }
+      }
     }
   },
   "quickstart": {

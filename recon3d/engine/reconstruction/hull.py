@@ -749,3 +749,208 @@ def ray_carve(rig: CameraRig, masks: Dict[str, np.ndarray], *,
     bounds = initial.bounds_min, initial.bounds_max if initial else rig.bounds()
     base = carve_volume(rig, masks, bounds=bounds, resolution=resolution)
     return base
+
+
+# --------------------------------------------------------------------------
+# Symmetry completion
+# --------------------------------------------------------------------------
+#: Axis letter -> grid axis of ``HullResult.occupancy`` (stored ``(z, y, x)``).
+_AXIS_TO_GRID = {"x": 2, "y": 1, "z": 0}
+
+
+def _mirror_axis(array: np.ndarray, axis: int, plane: float) -> np.ndarray:
+    """Mirror ``array`` about the (fractional) grid plane ``plane`` on ``axis``.
+
+    Grid index ``i`` maps to ``2 * plane - i``; indices that fall outside the
+    grid are dropped (they have no source voxel to copy from).
+    """
+    n = array.shape[axis]
+    index = 2.0 * float(plane) - np.arange(n, dtype=np.float64)
+    inside = (index >= 0) & (index <= n - 1)
+    source = np.clip(np.rint(index), 0, n - 1).astype(np.intp)
+    mirrored = np.take(array, source, axis=axis)
+    keep = np.ones(n, dtype=bool)
+    keep[inside] = False
+    slicer = [slice(None)] * array.ndim
+    slicer[axis] = keep
+    mirrored[tuple(slicer)] = False
+    return mirrored
+
+
+def _mirror_agreement(occupancy: np.ndarray, plane: float, axis: int) -> float:
+    """Dice overlap between the volume and its own mirror image.
+
+    Dice (``2|A n B| / (|A| + |B|)``) rather than IoU on purpose: voxels whose
+    mirror image falls outside the grid are dropped, which lets a *degenerate*
+    plane (fold the whole subject into its own middle) score spuriously well
+    under IoU.  Dice divides by the surviving mirror mass, so a plane that
+    cannot place the volume is penalised, and 1.0 still means "perfectly
+    symmetric about this plane".
+    """
+    mirrored = _mirror_axis(occupancy, axis, plane)
+    a = int(np.count_nonzero(occupancy))
+    b = int(np.count_nonzero(mirrored))
+    if a + b == 0:
+        return 0.0
+    return float(2 * np.count_nonzero(occupancy & mirrored) / (a + b))
+
+
+def mirror_complete(
+    result: HullResult,
+    *,
+    axis: str = "x",
+    plane: Optional[float] = None,
+    search_fraction: float = 0.18,
+    search_steps: int = 17,
+    min_fill_voxels: int = 24,
+    max_fill_fraction: float = 0.35,
+    reporter: Any = None,
+) -> Tuple[HullResult, Dict[str, Any]]:
+    """Complete the volume across the subject's mirror plane.
+
+    The plane comes from the stage-4 symmetry analysis; the *offset* is measured
+    on the carved volume itself (the plane that best explains the occupancy),
+    because the reported symmetry axis alone cannot know where the subject's
+    medial plane sits.  Voxels whose mirror image is occupied but which the
+    silhouette carve left empty are then filled in - that is the completion.
+
+    The caller must still verify the result against the references (see
+    ``_stage_reconstruct``); this function only proposes a volume and reports
+    exactly what it filled, so the pipeline can accept, reject or disclose it.
+    """
+    axis_key = str(axis or "x").lower()[:1]
+    if axis_key not in _AXIS_TO_GRID:
+        return result, {"skipped": True, "reason": f"unknown symmetry axis '{axis}'"}
+    grid_axis = _AXIS_TO_GRID[axis_key]
+    occupancy = np.asarray(result.occupancy, dtype=bool)
+    n = occupancy.shape[grid_axis]
+    if occupancy.size == 0 or n < 8:
+        return result, {"skipped": True, "reason": "volume too small for a mirror plane"}
+
+    # -- locate the plane: the offset that makes the volume most self-similar --
+    # Measured on the full grid (a strided sample of an even-sized volume is not
+    # itself symmetric, which biases the search): a coarse sweep, then a local
+    # refinement, so the plane is accurate without paying for a dense search.
+    occupied = np.argwhere(occupancy)
+    if occupied.size == 0:
+        return result, {"skipped": True, "reason": "empty volume"}
+    if plane is None:
+        centre = float(np.mean(occupied[:, grid_axis]))
+        span = max(1.0, float(search_fraction) * n)
+        steps = max(3, int(search_steps))
+        coarse_candidates = np.linspace(centre - span, centre + span, steps)
+        best = max(coarse_candidates,
+                   key=lambda p: _mirror_agreement(occupancy, float(p), grid_axis))
+        step = (coarse_candidates[1] - coarse_candidates[0]) if steps > 1 else 1.0
+        fine_candidates = np.linspace(float(best) - step, float(best) + step, 5)
+        plane_grid = float(max(fine_candidates,
+                              key=lambda p: _mirror_agreement(occupancy, float(p), grid_axis)))
+    else:
+        plane_grid = float(plane)
+    agreement = _mirror_agreement(occupancy, plane_grid, grid_axis)
+
+    mirrored = _mirror_axis(occupancy, grid_axis, plane_grid)
+    filled = mirrored & ~occupancy
+    fill_count = int(np.count_nonzero(filled))
+    total = int(np.count_nonzero(occupancy))
+    fill_fraction = fill_count / max(1, total)
+    world_plane = float(result.bounds_min[{"x": 0, "y": 1, "z": 2}[axis_key]] +
+                        (plane_grid + 0.5) * result.voxel_size)
+    report: Dict[str, Any] = {
+        "axis": axis_key,
+        "plane_index": round(float(plane_grid), 3),
+        "plane_world": round(world_plane, 6),
+        "mirror_agreement": round(float(agreement), 4),
+        "filled_voxels": fill_count,
+        "filled_fraction": round(float(fill_fraction), 5),
+        "filled_world_volume": round(float(fill_count) * float(result.voxel_size) ** 3, 8),
+    }
+    if fill_count < int(min_fill_voxels):
+        report.update({"applied": False,
+                       "reason": f"only {fill_count} voxel(s) were asymmetric; nothing to complete"})
+        return result, report
+    if fill_fraction > float(max_fill_fraction):
+        report.update({
+            "applied": False,
+            "reason": (f"the mirror would add {fill_fraction * 100:.0f}% of the volume; that is not a "
+                       "completion, it is a different subject - refusing it"),
+        })
+        return result, report
+
+    completed = occupancy | mirrored
+    half = [slice(None)] * completed.ndim
+    half[grid_axis] = slice(0, int(round(plane_grid)))
+    negative_filled = int(np.count_nonzero(filled[tuple(half)]))
+    report["regions"] = _symmetry_regions(
+        filled, result, axis_key,
+        filled_negative=negative_filled, filled_positive=fill_count - negative_filled,
+    )
+    report["applied"] = True
+    report["method"] = "mirror-completion of the silhouette volume about the measured plane"
+
+    if reporter is not None:
+        reporter.info(
+            f"symmetry completion: filled {fill_count} voxels "
+            f"({fill_fraction * 100:.1f}% of the volume) across the {axis_key} mirror plane "
+            f"at {world_plane:.4f} (agreement {agreement:.3f})"
+        )
+
+    completed_result = HullResult(
+        occupancy=completed,
+        bounds_min=np.asarray(result.bounds_min, dtype=np.float64).copy(),
+        bounds_max=np.asarray(result.bounds_max, dtype=np.float64).copy(),
+        voxel_size=float(result.voxel_size),
+        resolution=tuple(int(v) for v in result.resolution),
+        method=f"{result.method} + symmetry completion",
+        statistics=dict(result.statistics),
+    )
+    completed_result.statistics["symmetry_completion"] = report
+    return completed_result, report
+
+
+def _symmetry_regions(filled: np.ndarray, result: HullResult, axis: str,
+                      *, filled_negative: int, filled_positive: int,
+                      max_regions: int = 6, min_share: float = 0.02) -> List[Dict[str, Any]]:
+    """Label the filled voxels into readable regions (for the honesty report)."""
+    try:
+        from scipy import ndimage
+
+        labels, count = ndimage.label(filled, structure=np.ones((3, 3, 3), dtype=int))
+    except Exception:  # pragma: no cover - scipy is a core dependency
+        return [{
+            "region": (f"{filled_negative} voxel(s) on the negative {axis} side, "
+                       f"{filled_positive} on the positive side of the mirror plane"),
+            "voxels": int(np.count_nonzero(filled)),
+        }]
+    if count == 0:
+        return []
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    order = np.argsort(sizes)[::-1]
+    regions: List[Dict[str, Any]] = []
+    for label in order:
+        size = int(sizes[label])
+        if size <= 0 or size < min_share * max(1, int(np.count_nonzero(filled))):
+            continue
+        voxels = np.argwhere(labels == label)
+        low = result.grid_to_world(voxels.min(axis=0))
+        high = result.grid_to_world(voxels.max(axis=0))
+        side = "negative" if float(np.mean(voxels[:, _AXIS_TO_GRID[axis]])) < np.mean(
+            np.argwhere(filled)[:, _AXIS_TO_GRID[axis]]) else "positive"
+        regions.append({
+            "region": (f"symmetry-completed volume, {side} {axis} side "
+                       f"(bbox {np.round(low, 4).tolist()} - {np.round(high, 4).tolist()})"),
+            "voxels": size,
+            "bbox_min": np.round(low, 6).tolist(),
+            "bbox_max": np.round(high, 6).tolist(),
+        })
+        if len(regions) >= max_regions:
+            break
+    covered = sum(r["voxels"] for r in regions)
+    remainder = int(np.count_nonzero(filled)) - covered
+    if remainder > 0:
+        regions.append({
+            "region": f"symmetry completion: {remainder} further voxel(s) in smaller patches",
+            "voxels": remainder,
+        })
+    return regions

@@ -93,12 +93,12 @@ for a self-contained "clone → install → reconstruct → retrieve output" rec
 | 4 | `analysis` | subject-type classification, symmetry detection, material hints |
 | 5 | `features` | feature extraction and cross-view matching evidence |
 | 6 | `camera_estimation` | ring geometry, **lens (FOV) estimation**, scale gauge |
-| 7 | `mesh_reconstruction` | silhouette carve + photometric shell carve + depth fusion → mesh |
+| 7 | `mesh_reconstruction` | silhouette carve + photometric shell carve + depth fusion + **symmetry completion** → mesh |
 | 8 | `silhouette_refine` | re-render, compare, nudge cameras — accepted only if agreement improves |
 | 9 | `mesh_cleanup` | floaters, holes, non-manifold, normals, weld, degenerate faces |
 | 10 | `optimization` | topology + polycount budget |
 | 11 | `uv` | xatlas unwrap (built-in fallback) + quality report |
-| 12 | `texture` | multi-view projection → basecolor/normal/roughness/metallic/AO + ORM |
+| 12 | `texture` | multi-view projection, **diffusion inpainting of unobserved texels** → basecolor/normal/roughness/metallic/AO + ORM |
 | 13 | `materials` | evidence-based PBR material estimate + agent overrides |
 | 14 | `rigging` | humanoid/creature skeleton, auto skin weights, deformation stress test |
 | 15 | `lod` | LOD0–LOD3 chain with per-level budgets and surface-error measurement |
@@ -113,8 +113,10 @@ Run a subset with `--stages uv,texture`; resume an interrupted run with the same
 
 ## Parameters and presets
 
-`--preset draft|standard|high|ultra|game_ready|cinematic` sets geometry effort, texture
-resolution, carve levels, refinement passes and LOD policy in one word. Override any
+`--preset fast|draft|standard|high|ultra|game_ready|cinematic` sets geometry effort, texture
+resolution, carve levels, refinement passes and LOD policy in one word. `fast` is the
+iteration preset (smaller carve, 1K textures): use it while tuning views, then re-run with
+`standard` for the final asset. Override any
 individual parameter on the CLI (`--texture-resolution 4096 --target-polycount 30000`), in
 the API body, or via MCP arguments. Full list: `recon3d info --json`.
 
@@ -139,8 +141,20 @@ reference similarity, mesh health and texture quality, computed from the produce
 - mean colour RMSE for the textured model re-rendered from reference angles,
 - coverage delta (which parts of the subject were never observed),
 - `missing_regions` — the areas no reference image saw, so nothing is invented there,
+- `inferred` — **every region the engine filled in rather than observed**, each with its
+  kind (`symmetry_completion`, `texture_inpainting`), size and a `confidence` measured from
+  the distance to real evidence; the same entries are echoed into `missing_regions` as
+  `inferred: …` so a caller that only reads that list still sees them,
+- `budgets` — for presets that promise named budgets (`game_ready` ships a mobile and a
+  desktop one), the target, the measured actual value and a per-metric pass/fail,
 - warnings for every degraded or skipped stage, and
 - `reports/reference_comparison.json` for the render-vs-reference loop.
+
+Two things are deliberately *not* silent: a texture region no reference observed is filled
+by classical diffusion (no neural model, no generative API) and reported with a confidence,
+and a mirror-completed volume is kept only when it renders **better** against your
+references than the carve it replaces — otherwise it is discarded and the report says so.
+Inferred regions never raise the quality score.
 
 Reproduce the numbers yourself with the end-to-end gate:
 
@@ -166,7 +180,8 @@ through the public API and checks the produced files — scores are read from
 | Textures | 1024² basecolor, normal, roughness, metallic, AO, packed ORM |
 | UV atlas | 807 islands, mean distortion 0.236 |
 | LODs | 3 (124 032 / 62 016 / 31 008 triangles) |
-| End-to-end wall clock | 1 188 s (~20 min) for the standard preset at 224³ carving, machine otherwise idle |
+| End-to-end wall clock | 1 188 s (~20 min) for the standard preset on the CI runner; **2 097 s (35 min) and 688 MB peak RSS** re-measured on a 2-core / 4 GB CPU box for 1.1.0, where the carve budget is clamped to 224³ |
+| `fast` preset (same 9 views, 1024² textures) | **1 117 s (18.6 min)**, 481 MB peak RSS, quality 93.3 / mean IoU 0.882 — use it while tuning the reference set |
 | Gate result | `RESULT: PASS` (job completed, no failed stages, mesh + textures + GLB verified) |
 
 The full report of that run ships with the release (`recon3d-e2e-report-v1.0.0.json`) and in

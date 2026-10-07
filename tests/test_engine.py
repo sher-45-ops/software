@@ -239,3 +239,239 @@ def test_depth_fusion_produces_points_on_the_subject():
     assert 0.0 < float(stats["raw_points"]) >= float(stats["after_outlier_removal"]) > 0
     assert float(stats.get("mean_confidence", stats.get("confidence_mean", 1.0))) > 0.1
     assert "depth_maps" in fused
+
+
+# --------------------------------------------------------------------------- #
+# symmetry completion (stage-4 evidence -> filled volume, disclosed as inferred)
+# --------------------------------------------------------------------------- #
+def _hull_with_bump(size: int = 32, *, symmetric: bool = False, half_space: bool = False):
+    """A centred ball with (by default) a lobe protruding on +x only.
+
+    The -x side is therefore missing the mirror of that lobe: exactly the defect
+    symmetry completion exists to fill, and exactly the kind of fill that has to
+    be disclosed as inferred.
+    """
+    from recon3d.engine.reconstruction.hull import HullResult
+
+    centre = (size - 1) / 2.0
+    zz, yy, xx = np.mgrid[0:size, 0:size, 0:size]
+    ball = (xx - centre) ** 2 + (yy - centre) ** 2 + (zz - centre) ** 2 <= (size * 0.24) ** 2
+    if half_space:
+        occupancy = np.zeros((size, size, size), dtype=bool)
+        occupancy[:, :, size // 2:] = True
+    elif symmetric:
+        occupancy = ball
+    else:
+        lobe_centre = centre + size * 0.26
+        lobe = ((xx - lobe_centre) ** 2 + (yy - centre) ** 2 +
+                (zz - centre) ** 2) <= (size * 0.10) ** 2
+        occupancy = ball | lobe
+    return HullResult(
+        occupancy=occupancy,
+        bounds_min=np.array([-1.0, -1.0, -1.0]),
+        bounds_max=np.array([1.0, 1.0, 1.0]),
+        voxel_size=2.0 / size,
+        resolution=(size, size, size),
+        method="test",
+    )
+
+
+def test_mirror_completion_fills_the_missing_side_only():
+    from recon3d.engine.reconstruction.hull import _mirror_agreement, mirror_complete
+
+    hull = _hull_with_bump()
+    completed, report = mirror_complete(hull, axis="x")
+
+    assert report["applied"] is True, report.get("reason")
+    assert report["filled_voxels"] > 0
+    assert report["filled_fraction"] < 0.35, "a mirror must not invent a second subject"
+    assert 0.0 <= report["mirror_agreement"] <= 1.0
+    assert report["regions"], "every filled patch has to be describable in the report"
+    assert abs(report["plane_world"]) < 0.25, "the plane must land near the subject centre"
+
+    plane = report["plane_index"]
+    assert _mirror_agreement(completed.occupancy, plane, 2) >= _mirror_agreement(
+        hull.occupancy, plane, 2)
+    assert int(completed.occupancy.sum()) > int(hull.occupancy.sum())
+    assert not (hull.occupancy & ~completed.occupancy).any(), "original voxels must survive"
+
+
+def test_mirror_completion_refuses_to_invent_a_new_subject():
+    from recon3d.engine.reconstruction.hull import mirror_complete
+
+    # An 8.9% fill is already "a different subject" under this boundary, and the
+    # boundary is what protects against a mirror that rewrites the asset.
+    hull = _hull_with_bump()
+    completed, report = mirror_complete(hull, axis="x", max_fill_fraction=0.02)
+    assert report["applied"] is False
+    assert "not a completion" in report["reason"]
+    assert completed is hull, "a refused completion must not replace the volume"
+
+
+def test_mirror_completion_is_a_no_op_on_a_symmetric_volume():
+    from recon3d.engine.reconstruction.hull import mirror_complete
+
+    completed, report = mirror_complete(_hull_with_bump(symmetric=True), axis="x")
+    assert report["filled_voxels"] == 0
+    assert report["applied"] is False
+    assert completed is not None
+
+
+def test_symmetry_completion_records_inferred_entries():
+    """The pipeline helper must turn a completion into disclosed, confident entries."""
+    from recon3d.core.pipeline import _inferred_symmetry_entries
+
+    entries = _inferred_symmetry_entries(
+        {"filled_voxels": 100, "mirror_agreement": 0.83, "prior_symmetry": 0.9,
+         "axis": "x", "plane_world": 0.01,
+         "validation": {"base_iou": 0.88, "completed_iou": 0.90},
+         "regions": [{"region": "symmetry-completed volume (bbox [0,0,0] - [1,1,1])",
+                      "voxels": 60},
+                     {"region": "symmetry-completed volume: 40 further voxel(s)", "voxels": 40}]},
+        0.9)
+    assert len(entries) == 2
+    for entry in entries:
+        assert entry["kind"] == "symmetry_completion"
+        assert 0.0 < entry["confidence"] <= 0.95
+        assert "mirror agreement" in entry["evidence"]
+        assert "silhouette IoU" in entry["verified"]
+
+
+# --------------------------------------------------------------------------- #
+# texture inpainting (classic diffusion, reported as inferred)
+# --------------------------------------------------------------------------- #
+def test_texture_inpainting_fills_holes_and_measures_confidence():
+    from recon3d.engine.textures.project import inpaint_texture_holes
+
+    rho = 96
+    base = np.zeros((rho, rho, 3), dtype=np.float32)
+    base[..., 0], base[..., 1] = 0.2, 0.6
+    iy, ix = np.mgrid[16:80, 16:80].reshape(2, -1)
+    hole = (iy > 56) & (ix > 56)          # one large occluded quadrant
+    seam = (iy > 30) & (iy < 33)          # a thin seam
+    coverage = ~(hole | seam)
+
+    result = inpaint_texture_holes(base, coverage, iy, ix, rho=rho)
+
+    assert result["applied"] is True
+    assert result["inferred_texels"] == int((hole | seam).sum())
+    assert 0.0 < result["confidence"] <= 1.0
+    seam_regions = [r for r in result["regions"] if r.get("texel_bbox")]
+    assert seam_regions, "filled patches must be listed as regions"
+    # a thin seam sits next to observed texels and must be trusted more than the
+    # big occluded block
+    seam_conf = max((r["confidence"] for r in seam_regions
+                     if (r["texel_bbox"][3] - r["texel_bbox"][1]) <= 4), default=0.0)
+    block_conf = min((r["confidence"] for r in seam_regions
+                      if (r["texel_bbox"][3] - r["texel_bbox"][1]) > 4), default=1.0)
+    assert seam_conf > block_conf
+    assert all("texels" in r and "confidence" in r for r in result["regions"])
+
+    filled = result["_base"]
+    assert np.allclose(filled[70, 70], [0.2, 0.6, 0.0], atol=0.05)
+    assert np.allclose(filled[20, 20], [0.2, 0.6, 0.0], atol=1e-6), "observed texels stay untouched"
+
+
+def test_unobserved_texture_regions_reach_the_quality_report():
+    from recon3d.engine.compare.quality import score_quality
+
+    entry = {"kind": "texture_inpainting", "stage": "texture",
+             "region": "texture atlas region uv[0.1,0.1]-[0.2,0.2] (12 texels)",
+             "texels": 12, "confidence": 0.42}
+    quality = score_quality(comparison={"mean_iou": 0.9, "views": [{}]},
+                            mesh_stats={"faces": 1000}, inferred=[entry],
+                            budgets=[{"name": "mobile", "pass": True}])
+    assert quality["inferred"][0]["confidence"] == 0.42
+    assert quality["inferred_summary"]["kinds"] == ["texture_inpainting"]
+    assert any(m.startswith("inferred: ") and "0.42" in m for m in quality["missing_regions"]), \
+        "an agent reading only missing_regions must still see the filled regions"
+    assert quality["budgets"] == [{"name": "mobile", "pass": True}]
+    assert any("filled in" in w for w in quality["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# game_ready asset budgets
+# --------------------------------------------------------------------------- #
+class _BudgetContext:
+    """Minimal stand-in for PipelineContext (the budget export only needs these)."""
+
+    def __init__(self, version_dir, preset="game_ready"):
+        from types import SimpleNamespace
+
+        self.params = {"_preset": preset, "_performance_mode": "balanced"}
+        self.cache = {}
+        self.version_dir = version_dir
+        self.reporter = _QuietReporter()
+        self.budget = {"texture_resolution": 2048}
+        self.profile = SimpleNamespace(ram_mb=3939, logical_cores=2)
+
+    def request(self, key, default=None):
+        if key == "texture_resolution":
+            return 1024
+        return default
+
+    def dir_for(self, name):
+        path = self.version_dir / name
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+
+class _QuietReporter:
+    def __init__(self):
+        self.messages = []
+
+    def info(self, message, *a, **k):
+        self.messages.append(("info", str(message)))
+
+    def warning(self, message, *a, **k):
+        self.messages.append(("warning", str(message)))
+
+    def update(self, *a, **k):
+        pass
+
+
+def test_game_ready_preset_ships_a_measured_mobile_budget(tmp_path):
+    from recon3d.core.pipeline import _export_named_budgets, available_presets
+
+    budgets = {p["name"]: p.get("asset_budgets") for p in available_presets()}
+    mobile = budgets["game_ready"]["mobile"]
+    assert mobile["target_polycount"] == 12000
+    assert mobile["texture_resolution"] == 1024
+    assert not budgets["draft"], "only presets that promise budgets may declare them"
+
+    mesh = trimesh.creation.icosphere(subdivisions=3)
+    lod_dir = tmp_path / "lod"
+    lod_dir.mkdir()
+    ctx = _BudgetContext(tmp_path)
+    chain = {f"lod{i}": f"lod/lod{i}.glb" for i in range(4)}
+    reports = _export_named_budgets(ctx, mesh, lod_dir, chain)
+
+    by_name = {r["name"]: r for r in reports}
+    assert set(by_name) == {"mobile", "desktop"}
+    for report in by_name.values():
+        assert report["pass"] is True
+        assert (tmp_path / report["path"]).exists()
+        assert report["actual"]["target_polycount"] <= report["targets"]["target_polycount"]
+        assert report["checks"]["target_polycount"]["pass"] is True
+
+    # a budget that cannot be met is reported as failed, never silently dropped
+    ctx.params["_preset"] = "game_ready"
+    import recon3d.core.pipeline as pipeline
+
+    original = pipeline.load_preset
+
+    def _impossible(name):
+        preset = original(name)
+        if preset.get("name") == "game_ready":
+            preset = dict(preset)
+            # ask for a single LOD while four are shipped: must be reported, not hidden
+            preset["budgets"] = {"mobile": {"target_polycount": 12000, "lod_levels": 1}}
+        return preset
+
+    pipeline.load_preset = _impossible
+    try:
+        reports = pipeline._export_named_budgets(ctx, mesh, lod_dir, chain)
+    finally:
+        pipeline.load_preset = original
+    assert reports[0]["pass"] is False
+    assert any("not met" in message for _level, message in ctx.reporter.messages)

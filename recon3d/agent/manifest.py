@@ -25,7 +25,8 @@ STAGE_DESCRIPTIONS: Dict[str, str] = {
     "mesh_cleanup": "floaters, holes, non-manifold, normals, weld, degenerate faces",
     "optimization": "topology + polycount control (game-ready budgets)",
     "uv": "UV unwrap (xatlas, built-in fallback) + quality report",
-    "texture": "multi-view texture projection, PBR map derivation, ORM packing",
+    "texture": ("multi-view texture projection, diffusion inpainting of unobserved texels "
+                "(reported as inferred), PBR map derivation, ORM packing"),
     "materials": "evidence-based PBR material estimation + agent overrides",
     "rigging": "humanoid/creature skeleton + skin weights + deformation stress test",
     "lod": "LOD0-3 chain with error metrics",
@@ -35,11 +36,13 @@ STAGE_DESCRIPTIONS: Dict[str, str] = {
 }
 
 PRESET_DESCRIPTIONS: Dict[str, str] = {
+    "fast": "iteration preset: smaller carve + 1K textures, ~2-3x faster than standard",
     "draft": "fastest, lowest detail (preview / iteration)",
     "standard": "balanced default for everyday assets",
     "high": "high quality, larger textures, camera refinement",
     "ultra": "maximum quality, every stage at full effort",
-    "game_ready": "strict polycount + full LOD chain for real-time engines",
+    "game_ready": ("strict polycount + full LOD chain for real-time engines, with a measured "
+                   "mobile budget exported alongside the desktop one"),
     "cinematic": "maximum detail for offline rendering, no polycount limit",
 }
 
@@ -62,7 +65,7 @@ OUTPUT_TREE: Dict[str, str] = {
 #: parameter exists in ``DEFAULT_PARAMS`` without an entry here, so agents never
 #: discover features they cannot name (or names they cannot use).
 PARAMETER_DESCRIPTIONS: Dict[str, str] = {
-    "quality": "draft|standard|high|ultra|game_ready|cinematic",
+    "quality": "fast|draft|standard|high|ultra|game_ready|cinematic",
     "preset": "explicit preset name; wins over 'quality'",
     "style": "keep the supplied style; 'stylized' avoids photorealistic post-processing",
     "geometry": "low|medium|high|auto - carve fidelity before the preset budget",
@@ -70,6 +73,12 @@ PARAMETER_DESCRIPTIONS: Dict[str, str] = {
     "target_polycount": "int or 'auto' - triangle budget for the exported mesh",
     "preserve_sharp_edges": "bool - keep mechanical/hard edges instead of smoothing them away",
     "symmetry": "auto|none|on|x|y|z - enforce a mirror plane when the subject has one",
+    "symmetry_completion": ("bool - mirror-complete the carved volume across the detected plane; "
+                            "filled regions are reported as inferred with a confidence"),
+    "symmetry_min_score": ("0..1 - stage-4 bilateral symmetry required before mirror completion "
+                           "is attempted at all (default 0.70)"),
+    "texture_inpainting": ("bool - fill unobserved atlas texels by classical diffusion; each "
+                           "filled region is listed as inferred with a confidence"),
     "generate_uvs": "bool",
     "generate_pbr": "bool - derive normal/roughness/metallic/AO maps",
     "generate_rig": "bool - skeleton + skin weights (humanoid/creature)",
@@ -100,6 +109,29 @@ PARAMETER_DESCRIPTIONS: Dict[str, str] = {
 }
 
 
+def asset_budgets() -> Dict[str, Dict[str, Any]]:
+    """Named asset budgets the shipped presets promise (e.g. ``game_ready``).
+
+    Read straight from ``recon3d/presets/*.json`` so the manifest cannot drift
+    from what the pipeline actually enforces: a preset that declares a budget is
+    exported and measured, and the number an agent reads here is the number the
+    LOD stage checks.
+    """
+    import json
+    from pathlib import Path
+
+    budgets: Dict[str, Dict[str, Any]] = {}
+    root = Path(__file__).resolve().parent.parent / "presets"
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover - a broken preset must not break info
+            continue
+        if data.get("budgets"):
+            budgets[str(data.get("name") or path.stem)] = data["budgets"]
+    return budgets
+
+
 def capability_report() -> Dict[str, Any]:
     """Full, serialisable description of the engine's capabilities."""
     from ..core.pipeline import DEFAULT_PARAMS, STAGE_PROGRESS_NAMES
@@ -119,6 +151,7 @@ def capability_report() -> Dict[str, Any]:
                    for name in STAGE_PROGRESS_NAMES],
         "presets": PRESET_DESCRIPTIONS,
         "parameters": dict(PARAMETER_DESCRIPTIONS, defaults=DEFAULT_PARAMS),
+        "asset_budgets": asset_budgets(),
         "outputs": OUTPUT_TREE,
         "formats": sorted(SUPPORTED_FORMATS),
         "materials": sorted(MATERIAL_LIBRARY.keys()),

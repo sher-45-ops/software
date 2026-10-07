@@ -1,6 +1,6 @@
 {
   "name": "game_ready",
-  "description": "Optimised for real-time engines: strict polycount, LOD chain, no heavy refinement.",
+  "description": "Optimised for real-time engines: strict polycount, LOD chain, no heavy refinement; ships a measured desktop and mobile budget.",
   "performance_mode": "balanced",
   "params": {
     "geometry": "medium",
@@ -19,5 +19,19 @@
   },
   "policy": {
     "target_polycount": "force"
+  },
+  "budgets": {
+    "mobile": {
+      "description": "mobile / handheld GPU budget (glTF, single 1K material set)",
+      "target_polycount": 12000,
+      "texture_resolution": 1024,
+      "lod_levels": 4
+    },
+    "desktop": {
+      "description": "desktop / console real-time budget (LOD0)",
+      "target_polycount": 40000,
+      "texture_resolution": 2048,
+      "lod_levels": 4
+    }
   }
 }

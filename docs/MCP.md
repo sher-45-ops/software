@@ -46,7 +46,7 @@ it tells you whether optional accelerators are present and what performance mode
 machine can support.
 
 ```json
-{"version":"1.0.0","ok":true,"data_root":"/home/user/.recon3d","offline":false,
+{"version":"1.1.0","ok":true,"data_root":"/home/user/.recon3d","offline":false,
  "hardware":{"cpu":"…","cpu_count":2,"ram_total_mb":3939,"device":"cpu","ram_available_mb":3600},
  "backends":{…}}
 ```
@@ -110,7 +110,7 @@ paths straight into whatever consumes the asset next.
 
 ```bash
 $ python -m recon3d.mcpserver --json
-{"server": "recon3d", "version": "1.0.0",
+{"server": "recon3d", "version": "1.1.0",
  "tools": ["recon3d_doctor", "recon3d_create_project", "recon3d_reconstruct",
            "recon3d_job_status", "recon3d_list_outputs"]}
 ```

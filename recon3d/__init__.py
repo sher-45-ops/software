@@ -10,7 +10,7 @@ from __future__ import annotations
 
 __all__ = ["__version__", "VERSION", "get_version"]
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 __version__ = VERSION
 
 

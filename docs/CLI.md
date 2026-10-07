@@ -30,7 +30,7 @@ a new machine, and the first tool an agent should call before anything else.
 
 ```bash
 $ recon3d doctor
-recon3d 1.0.0 on Python 3.11.2 (linux)
+recon3d 1.1.0 on Python 3.11.2 (linux)
 data root: /home/user/.recon3d
 cpu: 2 cores, RAM 3.8 GB, device: cpu
 
@@ -75,11 +75,24 @@ refuses (destructive operations are always explicit).
 
 ## Reconstruction
 
+
+**Symmetry + inpainting controls** (also available as `--param key=value` / API / MCP args):
+
+| Flag | Parameter | Meaning |
+| --- | --- | --- |
+| `--symmetry auto\|on\|off\|none\|x\|y\|z` | `symmetry` | mirror-plane handling; `auto` lets the stage-4 analysis decide |
+| `--min-symmetry 0.70` | `symmetry_min_score` | how symmetric the subject must measure before mirroring is attempted |
+| `--no-symmetry-completion` | `symmetry_completion=false` | detect the plane but never mirror-complete the volume |
+| `--no-inpainting` | `texture_inpainting=false` | leave unobserved texels magenta instead of filling them |
+
+Filled regions always appear in `reports/quality.json` under `inferred` (with a confidence)
+and in `missing_regions`, whichever way they were produced.
+
 ### `recon3d reconstruct PROJECT [options]`
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--preset` | `standard` | `draft standard high ultra game_ready cinematic` |
+| `--preset` | `standard` | `fast draft standard high ultra game_ready cinematic` (`fast`: 18.6 min / 481 MB vs `standard`: 35 min / 688 MB on a 2-core, 4 GB box, same 9-view fixture) |
 | `--quality` | = preset | alias kept for scripts that speak "quality" |
 | `--target-polycount N` | `auto` | triangle budget for the exported mesh |
 | `--texture-resolution N` | preset | 512–8192 (clamped by hardware limits, reported) |

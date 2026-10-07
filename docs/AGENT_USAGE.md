@@ -64,6 +64,7 @@ MCP: `recon3d_create_project(name, image_paths)` → `recon3d_reconstruct(projec
 | Detail matters (faces, mechanical edges) | `high`, texture 4096 |
 | Real-time engine target | `game_ready` with `--target-polycount` |
 | Offline render / film | `cinematic` (no polycount cap) |
+| Fast iteration while tuning the references | `fast` (measured: 18.6 min / 481 MB / quality 93.3 vs `standard` 35 min / 688 MB / 93.7 on a 2-core 4 GB box) |
 | Small RAM (<8 GB) | `draft` or `standard`, texture ≤ 2048; the engine also clamps to the detected hardware |
 | Metric output | `--units meters --subject-height 1.8` (or centimetres/millimetres) |
 | Rigged character | add `--rig`; check `reports/rig.json` before use |
@@ -83,7 +84,13 @@ The full list with types and defaults is in `recon3d info --json → parameters`
     "mesh_health": 68.0, "texture_quality": 70.2,
     "metrics": {"mean_silhouette_iou": 0.795, "mean_color_rmse": 0.226,
                 "mean_coverage_delta": -0.029, "views_compared": 8},
-    "missing_regions": ["top"],
+    "missing_regions": ["top",
+      "inferred: texture atlas region uv[0.100,0.100]-[0.200,0.200] (12 texels) (confidence 0.42, texture_inpainting)"],
+    "inferred": [{"kind": "texture_inpainting", "stage": "texture", "region": "…",
+                  "texels": 12, "confidence": 0.42, "evidence": "…", "verified": "…"}],
+    "inferred_summary": {"regions": 1, "kinds": ["texture_inpainting"], "mean_confidence": 0.42},
+    "budgets": [{"name": "mobile", "pass": true, "checks": {"target_polycount":
+                 {"target": 12000, "actual": 11999, "pass": true}}}],
     "warnings": ["…"]
   },
   "statistics": {"triangles": 64968, "vertices": 52017, "watertight": true,
@@ -105,6 +112,7 @@ The full list with types and defaults is in `recon3d info --json → parameters`
 | `stage_failed`, `recoverable: false` | hard stop | fix the stated cause (usually images) and re-run; checkpoints resume the rest |
 | `warnings: ["depth estimation failed and was skipped"]` | optional refinement lost | accept, or report the bug |
 | `missing_regions: [...]` | unobserved areas | add views (top/back are the usual gaps) |
+| `missing_regions` entries starting `inferred:` | regions the engine **filled in** (symmetry completion, texture diffusion) | read the `inferred` block for the confidence; capture more views if the confidence is low |
 | `quality.grade` in `poor`/`bad` | references unusable | ask the human for better images; do not ship the asset |
 | `409 model_error` | optional model missing | run without it (fallback is automatic) or download explicitly |
 | HTTP `403 security_error` | sandbox/consent refusal | use the documented path semantics; never retry the same escape |

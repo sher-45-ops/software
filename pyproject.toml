@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "recon3d"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local-first multi-view image-to-3D reconstruction engine with CLI, REST API and MCP interfaces"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -53,10 +53,12 @@ dev = [
   "mcp>=1.2",
   "xatlas>=0.0.9",
 ]
-# Everything a power user / CI agent needs.
+# Everything a power user / CI agent needs - interfaces + quality boosters.
+# Deliberately *without* the neural extras: the engine is classical (no neural
+# model, no download) unless a user opts in with `pip install recon3d[neural]`.
 all = [
   "fastapi>=0.110", "uvicorn[standard]>=0.29", "python-multipart>=0.0.9",
-  "mcp>=1.2", "xatlas>=0.0.9", "pygltflib>=1.16", "onnxruntime>=1.17",
+  "mcp>=1.2", "xatlas>=0.0.9", "pygltflib>=1.16",
 ]
 
 [project.scripts]

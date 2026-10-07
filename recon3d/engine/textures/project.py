@@ -210,6 +210,7 @@ def project_texture(
     visibility: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
     unobserved_color: Sequence[int] = (255, 0, 255),
     sharpness_weight: bool = True,
+    inpaint_unobserved: bool = True,
     reporter: Any = None,
 ) -> TextureResult:
     """Reconstruct the base-colour map by multi-view projection."""
@@ -294,6 +295,22 @@ def project_texture(
     unobserved = np.array(unobserved_color, dtype=np.float32) / 255.0
     base[iy[~coverage], ix[~coverage]] = unobserved
 
+    # -- texture inpainting ---------------------------------------------
+    # The atlas texels that no reference observed are the seam/occlusion holes of
+    # the projection.  They are filled with a classic (non-neural) diffusion
+    # inpaint so the asset does not ship magenta patches, and every filled region
+    # is measured + listed as *inferred* with a confidence so the report stays
+    # honest about what the references actually showed.
+    inpainting: Dict[str, Any] = {"applied": False, "reason": "every atlas texel was observed"}
+    if inpaint_unobserved and bool((~coverage).any()):
+        inpainting = inpaint_texture_holes(
+            base, coverage, iy, ix, rho=rho,
+            region_min_texels=max(8, int(0.0005 * max(1, n_texels))),
+            reporter=reporter,
+        )
+        if inpainting.get("applied"):
+            base = inpainting.pop("_base")
+
     ao_values = np.ones(n_texels, dtype=np.float64)
     has_ao = occlusion_weight > 0
     ao_values[has_ao] = 1.0 - np.clip(occlusion[has_ao] / occlusion_weight[has_ao] * 1.6, 0, 0.85)
@@ -310,14 +327,23 @@ def project_texture(
         "mean_views_per_texel": round(float(view_count.mean()), 2),
         "per_view_texels": per_view_coverage,
         "unobserved_texels": int((~coverage).sum()),
+        "inpainting": inpainting,
         "generated_at": utc_now(),
     }
     warnings: List[str] = []
     if statistics["coverage_ratio"] < 0.6:
-        warnings.append(
-            f"only {statistics['coverage_ratio'] * 100:.0f}% of the texture atlas was observed by any "
-            "reference image; the magenta region marks surfaces no reference shows"
-        )
+        if inpainting.get("applied"):
+            warnings.append(
+                f"only {statistics['coverage_ratio'] * 100:.0f}% of the texture atlas was observed by "
+                f"any reference image; {inpainting['inferred_texels']} texel(s) in "
+                f"{len(inpainting.get('regions') or [])} region(s) were filled by diffusion and are "
+                "listed as inferred in reports/quality.json"
+            )
+        else:
+            warnings.append(
+                f"only {statistics['coverage_ratio'] * 100:.0f}% of the texture atlas was observed by "
+                "any reference image; the magenta region marks surfaces no reference shows"
+            )
 
     return TextureResult(
         base_color=base,
@@ -329,6 +355,253 @@ def project_texture(
         statistics=statistics,
         warnings=warnings,
     )
+
+
+# --------------------------------------------------------------------------
+# Texture inpainting (non-neural diffusion fill)
+# --------------------------------------------------------------------------
+def inpaint_texture_holes(
+    base: np.ndarray,
+    coverage: np.ndarray,
+    iy: np.ndarray,
+    ix: np.ndarray,
+    *,
+    rho: int,
+    region_min_texels: int = 8,
+    max_regions: int = 5,
+    reporter: Any = None,
+) -> Dict[str, Any]:
+    """Fill the atlas texels that no reference observed, and measure the fill.
+
+    The holes are the seam/occlusion gaps of the projection.  They are filled by
+    a classic multi-scale diffusion (pull-push) fill - no neural network, no
+    generative model - and every filled region is measured:
+
+    * ``confidence`` per region decays with the distance to the nearest texel a
+      reference actually observed, so a one-texel seam gap is trusted far more
+      than a whole occluded flank.
+
+    The caller (``project_texture``) records the result in the texture
+    statistics and the pipeline lists each region as *inferred* in
+    ``reports/quality.json``; the fill never silently raises a quality score.
+    """
+    rho = int(rho)
+    holes = np.zeros((rho, rho), dtype=bool)
+    holes[iy[~coverage], ix[~coverage]] = True
+    n_holes = int(holes.sum())
+    if n_holes == 0:
+        return {"applied": False, "reason": "no unobserved texels"}
+
+    filled = _diffusion_fill(np.asarray(base, dtype=np.float32), holes)
+
+    # -- confidence: distance to the nearest observed texel -----------------
+    confidence_map = np.zeros((rho, rho), dtype=np.float32)
+    distance = _distance_to_observed(~holes)
+    scale = max(1.0, 0.06 * rho)
+    confidence_map[holes] = np.clip(np.exp(-distance[holes] / scale), 0.05, 0.75)
+
+    # -- regions: connected patches of holes --------------------------------
+    regions, labels = _hole_regions(holes, confidence_map=confidence_map,
+                                    region_min_texels=region_min_texels,
+                                    max_regions=max_regions)
+    for region in regions:
+        region["share_of_filled"] = round(region["texels"] / max(1, n_holes), 4)
+        if region.get("texel_bbox"):
+            x0, y0, x1, y1 = region["texel_bbox"]
+            region["uv_bbox"] = [round(x0 / rho, 5), round(y0 / rho, 5),
+                                 round(x1 / rho, 5), round(y1 / rho, 5)]
+            region["region"] = (f"texture atlas region uv[{region['uv_bbox'][0]:.3f},"
+                                f"{region['uv_bbox'][1]:.3f}]-[{region['uv_bbox'][2]:.3f},"
+                                f"{region['uv_bbox'][3]:.3f}] ({region['texels']} texels, "
+                                "no reference observed it)")
+
+    observed = int(np.count_nonzero(coverage))
+    inpainting = {
+        "applied": True,
+        "method": "multi-scale diffusion fill (classical, non-neural)",
+        "inferred_texels": n_holes,
+        "inferred_ratio": round(n_holes / max(1, observed + n_holes), 4),
+        "confidence": round(float(confidence_map[holes].mean()), 3),
+        "confidence_basis": "exp(-distance to nearest observed texel / (0.06 * resolution)), capped at 0.75",
+        "regions": regions,
+        "_base": filled,
+    }
+    if reporter is not None:
+        reporter.info(
+            f"texture inpainting: {n_holes} unobserved texel(s) filled by diffusion in "
+            f"{len(regions)} region(s); listed as inferred (mean confidence "
+            f"{inpainting['confidence']:.2f})"
+        )
+    return inpainting
+
+
+def _diffusion_fill(image: np.ndarray, holes: np.ndarray, *, min_size: int = 4) -> np.ndarray:
+    """Fill ``holes`` by pull-push diffusion from the observed texels.
+
+    Coarse levels are built with masked box reduction (a level is "known" where
+    any of its children is known, so holes shrink by one texel per level); the
+    coarsest level is then pushed back down, filling only the still-unknown
+    texels and smoothing the boundary a couple of times at each scale.  Where the
+    coarsest level is *entirely* a hole the known mean is used - the fill is a
+    smooth interpolation of real observations, never invented detail.
+    """
+    image = np.asarray(image, dtype=np.float32)
+    if not holes.any():
+        return image
+    pyramid: List[Tuple[np.ndarray, np.ndarray]] = [(image, holes)]
+    while (min(pyramid[-1][0].shape[:2]) > min_size and len(pyramid) < 14
+           and pyramid[-1][1].any()):
+        image_l, holes_l = pyramid[-1]
+        pyramid.append((_downscale_masked(image_l, holes_l), _downscale_mask(holes_l)))
+
+    coarse, coarse_holes = pyramid[-1]
+    coarse = coarse.copy()
+    known = ~coarse_holes
+    if coarse_holes.any():
+        flat = coarse[known].mean(axis=0) if known.any() else np.zeros(coarse.shape[-1], np.float32)
+        coarse[coarse_holes] = flat
+
+    filled = coarse
+    for level in range(len(pyramid) - 2, -1, -1):
+        fine, fine_holes = pyramid[level]
+        up = _upsample(filled, fine.shape[:2])
+        out = fine.copy()
+        out[fine_holes] = up[fine_holes]
+        for _ in range(2):
+            out = _masked_smooth(out, ~fine_holes)
+        filled = out
+    return filled
+
+
+def _downscale_masked(image: np.ndarray, holes: np.ndarray) -> np.ndarray:
+    """Half-resolution masked mean (unobserved texels excluded from the average)."""
+    known = (~holes).astype(np.float32)
+    weight = known[..., None]
+    numerator = _box_down(image * weight)
+    denominator = _box_down(weight)
+    return (numerator / np.maximum(denominator, 1e-6)).astype(np.float32)
+
+
+def _box_down(array: np.ndarray) -> np.ndarray:
+    """2x2 box reduction that tolerates odd sizes."""
+    h, w = array.shape[:2]
+    h2, w2 = (h + 1) // 2, (w + 1) // 2
+    padded = array
+    if h % 2 or w % 2:
+        pad = [(0, h % 2), (0, w % 2)] + [(0, 0)] * (array.ndim - 2)
+        padded = np.pad(array, pad, mode="edge")
+    reshaped = padded.reshape(h2, 2, w2, 2, *array.shape[2:])
+    return reshaped.mean(axis=(1, 3))
+
+
+def _downscale_mask(holes: np.ndarray) -> np.ndarray:
+    """A coarse texel is a hole only when every child is a hole."""
+    return _box_down(holes.astype(np.float32)) >= 0.999999
+
+
+def _upsample(array: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
+    h, w = int(shape[0]), int(shape[1])
+    if array.shape[0] == h and array.shape[1] == w:
+        return array
+    if _HAS_CV2:
+        interpolation = cv2.INTER_LINEAR
+        return cv2.resize(array, (w, h), interpolation=interpolation)
+    rows = np.clip((np.arange(h) // max(1, h // max(1, array.shape[0]))), 0, array.shape[0] - 1)
+    cols = np.clip((np.arange(w) // max(1, w // max(1, array.shape[1]))), 0, array.shape[1] - 1)
+    return array[rows][:, cols]
+
+
+def _masked_smooth(image: np.ndarray, known: np.ndarray, *, passes: int = 1) -> np.ndarray:
+    """Blur ``image`` using only ``known`` texels (holes keep their filled value)."""
+    weight = known.astype(np.float32)
+    for _ in range(max(1, passes)):
+        numerator = _box_blur(image * weight[..., None])
+        denominator = _box_blur(weight)
+        safe = denominator > 1e-6
+        smoothed = np.where(safe[..., None],
+                            numerator / np.maximum(denominator, 1e-6)[..., None],
+                            image).astype(np.float32)
+        out = image.copy()
+        take = ~known
+        out[take] = smoothed[take]
+        image = out
+    return image
+
+
+def _box_blur(array: np.ndarray) -> np.ndarray:
+    if _HAS_CV2:
+        return cv2.blur(array, (3, 3))
+    padded = np.pad(array, [(1, 1), (1, 1)] + [(0, 0)] * (array.ndim - 2), mode="edge")
+    out = np.zeros_like(array)
+    for dy in range(3):
+        for dx in range(3):
+            out = out + padded[dy:dy + array.shape[0], dx:dx + array.shape[1]]
+    return out / 9.0
+
+
+def _distance_to_observed(observed: np.ndarray) -> np.ndarray:
+    """Euclidean distance from every texel to the nearest observed texel."""
+    if _HAS_CV2:
+        source = observed.astype(np.uint8)
+        if not source.any():  # pragma: no cover - nothing was observed at all
+            return np.full(observed.shape, 1e6, dtype=np.float32)
+        return cv2.distanceTransform(1 - source, cv2.DIST_L2, 3).astype(np.float32)
+    try:
+        from scipy import ndimage
+
+        return ndimage.distance_transform_edt(~observed).astype(np.float32)
+    except Exception:  # pragma: no cover
+        return np.full(observed.shape, 8.0, dtype=np.float32)
+
+
+def _hole_regions(holes: np.ndarray, *, confidence_map: np.ndarray,
+                  region_min_texels: int, max_regions: int
+                  ) -> Tuple[List[Dict[str, Any]], np.ndarray]:
+    """Label the hole patches into named regions plus one honest remainder.
+
+    Every texel is accounted for exactly once: patches at or above
+    ``region_min_texels`` become named regions with a bounding box and their own
+    mean confidence, the rest are summarised as a single "smaller patches" entry
+    whose confidence is measured over those texels only (never over the observed
+    atlas, which would fake either a perfect or a zero score).
+    """
+    try:
+        from scipy import ndimage
+
+        labels, count = ndimage.label(holes, structure=np.ones((3, 3), dtype=int))
+    except Exception:  # pragma: no cover - scipy is a core dependency
+        return ([{"region": f"{int(holes.sum())} unobserved atlas texel(s)",
+                  "texels": int(holes.sum()),
+                  "texel_bbox": None,
+                  "confidence": round(float(confidence_map[holes].mean()), 3)}],
+                holes.astype(np.int32))
+    sizes = np.bincount(labels.ravel()) if count else np.zeros(1, dtype=int)
+    sizes[0] = 0
+    order = [int(i) for i in np.argsort(sizes)[::-1] if sizes[i] >= region_min_texels]
+    regions: List[Dict[str, Any]] = []
+    covered = np.zeros_like(holes)
+    for label in order[:max_regions]:
+        rows, cols = np.nonzero(labels == label)
+        covered |= labels == label
+        regions.append({
+            "texels": int(sizes[label]),
+            "texel_bbox": [int(cols.min()), int(rows.min()),
+                           int(cols.max()) + 1, int(rows.max()) + 1],
+            "confidence": round(float(confidence_map[labels == label].mean()), 3),
+        })
+    remainder = holes & ~covered
+    n_rest = int(remainder.sum())
+    if n_rest > 0:
+        patches = max(0, int(count) - len(order[:max_regions]))
+        regions.append({
+            "region": (f"{n_rest} unobserved texel(s) in {patches} smaller patch(es) "
+                       "scattered across the atlas" if patches else
+                       f"{n_rest} unobserved texel(s) in small patches across the atlas"),
+            "texels": n_rest,
+            "texel_bbox": None,
+            "confidence": round(float(confidence_map[remainder].mean()), 3),
+        })
+    return regions, labels
 
 
 def _view_direction(camera: Camera) -> np.ndarray:

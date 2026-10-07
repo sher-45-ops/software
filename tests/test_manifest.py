@@ -122,3 +122,47 @@ def test_manifest_recovery_and_policy_claims_are_real(manifest):
     manager.create("guarded", subject_type="robot")
     with pytest.raises(SecurityError):
         manager.delete("guarded")
+
+
+def test_presets_are_documented_and_selectable():
+    """Every shipped preset must be documented, selectable and resolvable.
+
+    `fast` was added for iteration speed; if a preset exists as a file but not in
+    `PRESET_DESCRIPTIONS`/the CLI choices, an agent reading the manifest cannot use it -
+    exactly the drift this module exists to catch.
+    """
+    from recon3d.agent.manifest import PRESET_DESCRIPTIONS
+    from recon3d.cli.main import build_parser
+    from recon3d.core.pipeline import available_presets, resolve_params
+
+    names = [preset["name"] for preset in available_presets()]
+    assert set(names) == set(PRESET_DESCRIPTIONS), (
+        f"presets without docs: {sorted(set(names) - set(PRESET_DESCRIPTIONS))}, "
+        f"docs without presets: {sorted(set(PRESET_DESCRIPTIONS) - set(names))}")
+
+    parser = build_parser()
+    reconstruct = next(action for action in parser._actions
+                       if action.dest == "command").choices["reconstruct"]
+    for dest in ("preset", "quality"):
+        choices = next(action for action in reconstruct._actions if action.dest == dest).choices
+        assert set(names) <= set(choices), f"--{dest} cannot select every preset"
+
+    for name in names:
+        params = resolve_params({"quality": name})
+        assert params["_preset"] == name, f"'{name}' resolves to {params['_preset']}"
+
+
+def test_neural_backends_stay_optional():
+    """The engine must never import onnxruntime/torch for its classical path."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, recon3d.core.pipeline\n"
+        "bad = [m for m in ('onnxruntime', 'torch') if m in sys.modules]\n"
+        "print(','.join(bad))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(ROOT))
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.strip() == "", f"the pipeline imported neural backends: {out.stdout!r}"

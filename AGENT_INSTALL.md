@@ -28,13 +28,13 @@ python -m venv .venv
 pip install -e ".[all]"
 ```
 
-`.[all]` adds the API, MCP, UV/GLB quality extras and onnxruntime. The engine also runs with
+`.[all]` adds the API, MCP and UV/GLB quality extras. The engine also runs with
 plain `pip install -e .`; the missing pieces simply fall back (and `doctor` says so).
 
 Verify:
 
 ```bash
-recon3d --version      # recon3d 1.0.0
+recon3d --version      # recon3d 1.1.0
 recon3d doctor --json  # hardware, dependencies, backends, data root
 recon3d info --json    # stages, presets, parameters, output tree, formats
 ```
@@ -49,6 +49,11 @@ Windows-only notes: use `python` from an official installer; if you are on a mac
 recon3d setup                       # writes ~/.recon3d/config.json and creates the tree
 recon3d setup --data-root D:\recon3d-data   # or an explicit location
 ```
+
+Optional local neural backends (ONNX Runtime, torch) are **not installed by default and stay
+disabled** unless you opt in with `pip install -e ".[neural]"` *and* download a model
+explicitly (`recon3d models download`). Everything in this file — including symmetry
+completion and texture inpainting — is classical CPU code with no model weights.
 
 The data root holds everything the engine writes: `projects/`, `models/`, `cache/`, `logs/`,
 `config.json`. Override per run with the `RECON3D_HOME` environment variable.
